@@ -1,0 +1,474 @@
+"""
+Derived module from bopdmd.py for BOP-DMD with sparse modes.
+"""
+
+from numbers import Number
+from typing import Callable, Union
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import qr
+
+from .bopdmd import BOPDMD, BOPDMDOperator
+from .snapshots import Snapshots
+from .utils import compute_rank, compute_svd
+
+
+def accelerated_prox_grad(
+    X0: np.ndarray,
+    func_f: Callable,
+    func_g: Callable,
+    grad_f: Callable,
+    prox_g: Callable,
+    beta_f: float,
+    tol: float = 1e-8,
+    max_iter: int = 1000,
+    use_restarts: bool = True,
+):
+    """
+    Accelerated Proximal Gradient Descent for
+        min_X f(X) + g(X)
+    where f is beta smooth and g is proxable.
+
+    :param X0: Initial value for the solver.
+    :type X0: np.ndarray
+    :param func_f: Smooth portion of the objective function.
+    :type func_f: function
+    :param func_g: Regularizer portion of the objective function.
+    :type func_g: function
+    :param grad_f: Gradient of f with respect to X.
+    :type grad_f: function
+    :param prox_g: Proximal operator of g given X and a constant float.
+    :type prox_g: function
+    :param beta_f: Beta smoothness constant for f.
+    :type beta_f: float
+    :param tol: Tolerance for terminating the solver.
+    :type tol: float
+    :param max_iter: Maximum number of iterations for the solver.
+    :type max_iter: int
+    :param use_restarts: Whether or not to reset t when the objective
+        function value worsens.
+    :type use_restarts: bool
+
+    :return: Tuple consisting of the following components:
+        1. Final optimal solution.
+        2. Objective value history across iterations.
+        3. Convergece history across iterations.
+    :rtype: Tuple[np.ndarray, list, list]
+    """
+    # Set initial values.
+    X = X0.copy()
+    Y = X0.copy()
+    t = 1.0
+
+    step_size = 1.0 / beta_f
+    obj_hist = np.empty(max_iter)
+    err_hist = np.empty(max_iter)
+
+    # Start iteration.
+    iter_count = 0
+    err = tol + 1.0
+
+    while err >= tol:
+        # Proximal gradient descent step.
+        X_new = prox_g(Y - step_size * grad_f(Y), step_size)
+        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t**2))
+        Y_new = X_new + ((t - 1.0) / t_new) * (X_new - X)
+
+        # Get new objective and error values.
+        obj = func_f(X_new) + func_g(X_new)
+        err = np.linalg.norm(X - X_new)
+        obj_hist[iter_count] = obj
+        err_hist[iter_count] = err
+
+        # Update information.
+        np.copyto(X, X_new)
+        np.copyto(Y, Y_new)
+        t = t_new
+
+        # Reset t if objective function value is getting worse.
+        if use_restarts and iter_count > 1:
+            if obj_hist[iter_count - 1] < obj_hist[iter_count]:
+                t = 1.0
+
+        # Check if exceed maximum number of iterations.
+        iter_count += 1
+        if iter_count >= max_iter:
+            print("Proximal gradient descent reached maximum iterations.")
+            return X, obj_hist[:iter_count], err_hist[:iter_count]
+
+    return X, obj_hist[:iter_count], err_hist[:iter_count]
+
+
+class sBOPDMDOperator(BOPDMDOperator):
+    """
+    BOP-DMD operator with sparse modes.
+    """
+
+    # TODO: add the following extra parameters for prox grad:
+    # - tol: float = 1e-8
+    # - max_iter: int = 1000
+    # - use_restarts: bool = True
+    def __init__(
+        self,
+        mode_regularizer,
+        mode_prox,
+        compute_A,
+        use_proj,
+        init_alpha,
+        proj_basis,
+        num_trials,
+        trial_size,
+        eig_sort,
+        eig_constraints,
+        bag_warning,
+        bag_maxfail,
+        init_lambda=1.0,
+        maxlam=52,
+        lamup=2.0,
+        maxiter=30,
+        tol=1e-6,
+        eps_stall=1e-12,
+        verbose=False,
+    ):
+        super().__init__(
+            compute_A=compute_A,
+            use_proj=use_proj,
+            init_alpha=init_alpha,
+            proj_basis=proj_basis,
+            num_trials=num_trials,
+            trial_size=trial_size,
+            eig_sort=eig_sort,
+            eig_constraints=eig_constraints,
+            mode_prox=mode_prox,
+            bag_warning=bag_warning,
+            bag_maxfail=bag_maxfail,
+            init_lambda=init_lambda,
+            maxlam=maxlam,
+            lamup=lamup,
+            maxiter=maxiter,
+            tol=tol,
+            eps_stall=eps_stall,
+            verbose=verbose,
+        )
+        self._mode_regularizer = mode_regularizer
+
+    def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
+        """
+        Variable projection routine for multivariate data with regularization.
+        """
+        # Define M, IS, and IA.
+        M, IS = H.shape
+        IA = len(init_alpha)
+
+        # Unpack all variable projection parameters stored in varpro_opts.
+        (
+            init_lambda,
+            maxlam,
+            lamup,
+            _,
+            maxiter,
+            tol,
+            eps_stall,
+            _,
+            verbose,
+        ) = self._varpro_opts
+
+        def compute_objective(B, alpha):
+            """
+            Helper function for computing the current objective.
+            """
+            residual = H - Phi(alpha, t).dot(B)
+            objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
+            objective += self._mode_regularizer(B)
+
+            return objective
+
+        def update_B(B0, alpha):
+            """
+            Use accelerated prox gradient to update B for the current alpha.
+            """
+            Phi_matrix = Phi(alpha, t)
+            PhiH_Phi = Phi_matrix.conj().T.dot(Phi_matrix)
+            beta_f = np.linalg.norm(Phi_matrix, 2) ** 2
+
+            def func_f(A):
+                return 0.5 * np.linalg.norm(H - Phi_matrix.dot(A), "fro") ** 2
+
+            def grad_f(A):
+                return PhiH_Phi.dot(A) - Phi_matrix.conj().T.dot(H)
+
+            B_updated, obj_hist, err_hist = accelerated_prox_grad(
+                B0,
+                func_f,
+                self._mode_regularizer,
+                grad_f,
+                self._mode_prox,
+                beta_f,
+            )
+
+            if verbose:
+                # TODO: add a message for the user.
+                plt.figure(figsize=(8, 2))
+                plt.subplot(1, 2, 1)
+                plt.title("Objective")
+                plt.plot(obj_hist, "-o")
+                plt.semilogy()
+                plt.subplot(1, 2, 2)
+                plt.title("Error")
+                plt.plot(err_hist, "-o")
+                plt.semilogy()
+                plt.tight_layout()
+                plt.show()
+
+            return B_updated
+
+        def update_alpha(B, alpha_0):
+            """
+            Use Levenberg-Marquardt to step alpha for the current B.
+            """
+            djac_matrix = np.zeros((M * IS, IA), dtype="complex")
+            rjac = np.zeros((2 * IA, IA), dtype="complex")
+            scales = np.zeros(IA)
+            obj_0 = compute_objective(B, alpha_0)
+            _lambda = init_lambda
+
+            for i in range(IA):
+                # Build the Jacobian matrix by looping over all alpha indices.
+                djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
+                # Scale for the Levenberg-Marquardt algorithm.
+                scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
+                scales[i] = max(scales[i], 1e-6)
+
+            # Loop to determine lambda (the step-size parameter).
+            residual = H - Phi(alpha_0, t).dot(B)
+            rhs_temp = residual.ravel(order="F")[:, None]
+            q_out, djac_out, j_pvt = qr(
+                djac_matrix, mode="economic", pivoting=True
+            )
+            ij_pvt = np.arange(IA)
+            ij_pvt = ij_pvt[j_pvt]
+            rjac[:IA] = np.triu(djac_out[:IA])
+            rhs_top = q_out.conj().T.dot(rhs_temp)
+            scales_pvt = scales[j_pvt[:IA]]
+            rhs = np.concatenate(
+                (rhs_top[:IA], np.zeros(IA, dtype="complex")), axis=None
+            )
+
+            def step(lam):
+                """
+                Helper function that, given a step size _lambda,
+                computes and returns the updated alpha vector.
+                """
+                # Compute the step delta.
+                rjac[IA:] = lam * np.diag(scales_pvt)
+                delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
+                delta = delta[ij_pvt]
+                # Compute the updated alpha vector.
+                alpha_updated = alpha_0.ravel() + delta.ravel()
+                alpha_updated = self._push_eigenvalues(alpha_updated)
+                return alpha_updated
+
+            # Take a step using our initial step size init_lambda.
+            alpha_new = step(_lambda)
+            obj_new = compute_objective(B, alpha_new)
+
+            # If the objective improved, terminate.
+            if obj_new < obj_0:
+                return alpha_new
+
+            # Otherwise increase lambda until something works.
+            for _ in range(maxlam):
+                _lambda *= lamup
+                alpha_new = step(_lambda)
+                obj_new = compute_objective(B, alpha_new)
+
+                if obj_new < obj_0:
+                    return alpha_new
+
+            # Terminate if no appropriate step length was found...
+            if verbose:
+                print(
+                    "Failed to find appropriate step length. "
+                    "Consider increasing maxlam or changing lamup."
+                )
+
+            return alpha_0
+
+        # Initialize values.
+        alpha = init_alpha
+        B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+        all_obj = np.empty(maxiter)
+        all_err = np.empty(maxiter)
+        all_err_a = np.empty(maxiter)
+        all_err_b = np.empty(maxiter)
+
+        # Initialize termination flags.
+        converged = False
+        stalled = False
+
+        for itr in range(maxiter):
+            # Get the new optimal matrix B.
+            B_new = update_B(B, alpha)
+
+            # Take a Levenberg-Marquardt step to update alpha.
+            alpha_new = update_alpha(B_new, alpha)
+
+            # Get new objective and error values.
+            all_obj[itr] = compute_objective(B_new, alpha_new)
+            all_err_a[itr] = np.linalg.norm(alpha - alpha_new)
+            all_err_b[itr] = np.linalg.norm(B - B_new)
+            all_err[itr] = all_err_a[itr] + all_err_b[itr]
+
+            # Update information.
+            np.copyto(alpha, alpha_new)
+            np.copyto(B, B_new)
+
+            # Print iterative progress if the verbose flag is turned on.
+            if verbose:
+                print(
+                    f"Iteration {itr + 1}: "
+                    f"Objective = {all_obj[itr]} "
+                    f"Error (alpha) = {all_err_a[itr]} "
+                    f"Error (B) = {all_err_b[itr]}.\n"
+                )
+
+            # Update termination status and terminate if converged or stalled.
+            converged = all_err[itr] < tol
+            stalled = (itr > 0) and (
+                all_err[itr - 1] - all_err[itr] < eps_stall * all_err[itr - 1]
+            )
+
+            if converged:
+                if verbose:
+                    print("Convergence reached!")
+                return B, alpha, converged
+
+            if stalled:
+                if verbose:
+                    msg = (
+                        "Stall detected: error reduced by less than {} times "
+                        "the error at the previous step. Iteration {}. "
+                        "Current error {}. Consider increasing tol or "
+                        "decreasing eps_stall."
+                    )
+                    print(msg.format(eps_stall, itr + 1, all_err[itr]))
+                return B, alpha, converged
+
+        # Failed to meet tolerance in maxiter steps.
+        if verbose:
+            msg = (
+                "Failed to reach tolerance after maxiter = {} iterations. "
+                "Current error {}."
+            )
+            print(msg.format(maxiter, all_err[itr]))
+
+        return B, alpha, converged
+
+
+class SparseBOPDMD(BOPDMD):
+    """
+    Dynamic Mode Decomposition with sparse modes.
+
+    :param mode_regularizer:
+    :param mode_prox:
+    """
+    # TODO: add documentation for the new parameters.
+
+    def __init__(
+        self,
+        mode_regularizer: Callable = None,
+        mode_prox: Callable = None,
+        svd_rank: Number = 0,
+        compute_A: bool = False,
+        init_alpha: np.ndarray = None,
+        num_trials: int = 0,
+        trial_size: Number = 0.8,
+        eig_sort: str = "auto",
+        eig_constraints: Union[set, Callable] = None,
+        bag_warning: int = 100,
+        bag_maxfail: int = -1,
+        varpro_opts_dict: dict = None,
+    ):
+        super().__init__(
+            svd_rank=svd_rank,
+            compute_A=compute_A,
+            use_proj=False,  # don't project the data
+            init_alpha=init_alpha,
+            proj_basis=None,  # ignore since we don't project the data
+            num_trials=num_trials,
+            trial_size=trial_size,
+            eig_sort=eig_sort,
+            eig_constraints=eig_constraints,
+            mode_prox=mode_prox,
+            bag_warning=bag_warning,
+            bag_maxfail=bag_maxfail,
+            varpro_opts_dict=varpro_opts_dict,
+        )
+        self._mode_regularizer = mode_regularizer
+
+    def fit(self, X, t):
+        """
+        Compute the Optimized Dynamic Mode Decomposition with regularization.
+
+        :param X: the input snapshots.
+        :type X: numpy.ndarray or iterable
+        :param t: the input time vector.
+        :type t: numpy.ndarray or iterable
+        """
+        # Process the input data and convert to numpy.ndarrays.
+        self._reset()
+        self._snapshots_holder = Snapshots(X)
+        self._time = np.array(t).squeeze()
+
+        # Check that input time vector is one-dimensional.
+        if self._time.ndim > 1:
+            raise ValueError("Input time vector t must be one-dimensional.")
+
+        # Check that the number of snapshots in the data matrix X matches the
+        # number of time points in the time vector t.
+        if self.snapshots.shape[1] != len(self._time):
+            msg = (
+                "The number of columns in the data matrix X must match "
+                "the number of time points in the time vector t."
+            )
+            raise ValueError(msg)
+
+        # Compute the rank of the fit.
+        self._svd_rank = int(compute_rank(self.snapshots, self._svd_rank))
+
+        # Set/check the projection basis.
+        self._proj_basis = compute_svd(self.snapshots, -1)[0]
+
+        # Set/check the initial guess for the continuous-time DMD eigenvalues.
+        if self._init_alpha is None:
+            self._init_alpha = self._initialize_alpha()
+        elif (
+            not isinstance(self._init_alpha, np.ndarray)
+            or self._init_alpha.ndim > 1
+            or len(self._init_alpha) != self._svd_rank
+        ):
+            msg = "init_alpha must be a 1D np.ndarray with {} entries."
+            raise ValueError(msg.format(self._svd_rank))
+
+        # Build the operator now that the initial alpha has been defined.
+        self._Atilde = sBOPDMDOperator(
+            self._mode_regularizer,
+            self._mode_prox,
+            self._compute_A,
+            self._use_proj,
+            self._init_alpha,
+            self._proj_basis,
+            self._num_trials,
+            self._trial_size,
+            self._eig_sort,
+            self._eig_constraints,
+            self._bag_warning,
+            self._bag_maxfail,
+            **self._varpro_opts_dict,
+        )
+
+        # Fit the data.
+        self._b = self.operator.compute_operator(self.snapshots.T, self._time)
+
+        return self
