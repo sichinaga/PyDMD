@@ -15,7 +15,6 @@ from pydmd.utils import compute_rqb
 
 def randomized_preprocessing(
     dmd: DMDBase,
-    svd_rank: Number,
     oversampling: int = 10,
     power_iters: int = 2,
     test_matrix: np.ndarray = None,
@@ -25,7 +24,6 @@ def randomized_preprocessing(
     Randomized QB pre-processing.
 
     :param dmd: DMD instance to be wrapped.
-    :param svd_rank: target rank of the input data.
     :param oversampling: amount to oversample beyond the target rank.
     :param power_iters: number of power iterations to perform.
     :param test_matrix: optional custom random test matrix.
@@ -35,7 +33,7 @@ def randomized_preprocessing(
         dmd,
         partial(
             _pre,
-            svd_rank=svd_rank,
+            svd_rank=dmd.svd_rank,
             oversampling=oversampling,
             power_iters=power_iters,
             test_matrix=test_matrix,
