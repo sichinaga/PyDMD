@@ -184,6 +184,7 @@ class DMDBase:
             tikhonov_regularization=tikhonov_regularization,
         )
 
+        self._svd_rank = svd_rank
         self._tlsq_rank = tlsq_rank
         self._original_time = None
         self._dmd_time = None
@@ -195,6 +196,14 @@ class DMDBase:
         self._snapshots_holder_y = None
 
         self._modes_activation_bitmask_proxy = None
+
+    @property
+    def svd_rank(self):
+        """
+        :return: the rank used for the svd truncation.
+        :rtype: int or float
+        """
+        return self._svd_rank
 
     @property
     def dmd_timesteps(self):
