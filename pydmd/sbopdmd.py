@@ -121,7 +121,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         trial_size,
         eig_sort,
         eig_constraints,
-        bag_warning,
         bag_maxfail,
         init_lambda=1.0,
         maxlam=52,
@@ -141,7 +140,6 @@ class sBOPDMDOperator(BOPDMDOperator):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
-            bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
             init_lambda=init_lambda,
             maxlam=maxlam,
@@ -386,7 +384,6 @@ class SparseBOPDMD(BOPDMD):
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
         eig_constraints: Union[set, Callable] = None,
-        bag_warning: int = 100,
         bag_maxfail: int = -1,
         varpro_opts_dict: dict = None,
     ):
@@ -401,7 +398,6 @@ class SparseBOPDMD(BOPDMD):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
-            bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
             varpro_opts_dict=varpro_opts_dict,
         )
@@ -463,7 +459,6 @@ class SparseBOPDMD(BOPDMD):
             self._trial_size,
             self._eig_sort,
             self._eig_constraints,
-            self._bag_warning,
             self._bag_maxfail,
             **self._varpro_opts_dict,
         )
