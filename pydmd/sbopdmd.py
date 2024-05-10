@@ -21,9 +21,9 @@ def accelerated_prox_grad(
     grad_f: Callable,
     prox_g: Callable,
     beta_f: float,
-    tol: float = 1e-8,
-    max_iter: int = 1000,
-    use_restarts: bool = True,
+    tol: float,
+    max_iter: int,
+    use_restarts: bool,
 ):
     """
     Accelerated Proximal Gradient Descent for
@@ -104,11 +104,6 @@ class sBOPDMDOperator(BOPDMDOperator):
     """
     BOP-DMD operator with sparse modes.
     """
-
-    # TODO: add the following extra parameters for prox grad:
-    # - tol: float = 1e-8
-    # - max_iter: int = 1000
-    # - use_restarts: bool = True
     def __init__(
         self,
         mode_regularizer,
@@ -121,6 +116,8 @@ class sBOPDMDOperator(BOPDMDOperator):
         trial_size,
         eig_sort,
         eig_constraints,
+        remove_bad_bags,
+        bag_warning,
         bag_maxfail,
         init_lambda=1.0,
         maxlam=52,
@@ -129,6 +126,9 @@ class sBOPDMDOperator(BOPDMDOperator):
         tol=1e-6,
         eps_stall=1e-12,
         verbose=False,
+        prox_grad_tol=1e-6,
+        prox_grad_maxiter=1000,
+        prox_grad_restart=True,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -140,6 +140,8 @@ class sBOPDMDOperator(BOPDMDOperator):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
+            remove_bad_bags=remove_bad_bags,
+            bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
             init_lambda=init_lambda,
             maxlam=maxlam,
@@ -150,6 +152,13 @@ class sBOPDMDOperator(BOPDMDOperator):
             verbose=verbose,
         )
         self._mode_regularizer = mode_regularizer
+
+        # Set the parameters of accelerated prox gradient descent.
+        self._prox_grad_params = {}
+        self._prox_grad_params["tol"] = prox_grad_tol
+        self._prox_grad_params["max_iter"] = prox_grad_maxiter
+        self._prox_grad_params["use_restarts"] = prox_grad_restart
+
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
@@ -174,7 +183,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         def compute_objective(B, alpha):
             """
-            Helper function for computing the current objective.
+            Compute the current objective.
             """
             residual = H - Phi(alpha, t).dot(B)
             objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
@@ -182,7 +191,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return objective
 
-        def update_B(B0, alpha):
+        def compute_B(B0, alpha):
             """
             Use accelerated prox gradient to update B for the current alpha.
             """
@@ -203,6 +212,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                 grad_f,
                 self._mode_prox,
                 beta_f,
+                **self._prox_grad_params,
             )
 
             if verbose:
@@ -221,15 +231,15 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return B_updated
 
-        def update_alpha(B, alpha_0):
+        def compute_alpha(B, alpha_0):
             """
             Use Levenberg-Marquardt to step alpha for the current B.
             """
             djac_matrix = np.zeros((M * IS, IA), dtype="complex")
             rjac = np.zeros((2 * IA, IA), dtype="complex")
             scales = np.zeros(IA)
-            obj_0 = compute_objective(B, alpha_0)
-            _lambda = init_lambda
+            objective = compute_objective(B, alpha_0)
+            residual = H - Phi(alpha_0, t).dot(B)
 
             for i in range(IA):
                 # Build the Jacobian matrix by looping over all alpha indices.
@@ -239,7 +249,6 @@ class sBOPDMDOperator(BOPDMDOperator):
                 scales[i] = max(scales[i], 1e-6)
 
             # Loop to determine lambda (the step-size parameter).
-            residual = H - Phi(alpha_0, t).dot(B)
             rhs_temp = residual.ravel(order="F")[:, None]
             q_out, djac_out, j_pvt = qr(
                 djac_matrix, mode="economic", pivoting=True
@@ -253,13 +262,13 @@ class sBOPDMDOperator(BOPDMDOperator):
                 (rhs_top[:IA], np.zeros(IA, dtype="complex")), axis=None
             )
 
-            def step(lam):
+            def step(_lambda, scales_pvt=scales_pvt, rhs=rhs, ij_pvt=ij_pvt):
                 """
-                Helper function that, given a step size _lambda,
-                computes and returns the updated alpha vector.
+                Helper function that, when given a step size _lambda,
+                computes and returns the updated step and alpha vectors.
                 """
                 # Compute the step delta.
-                rjac[IA:] = lam * np.diag(scales_pvt)
+                rjac[IA:] = _lambda * np.diag(scales_pvt)
                 delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
                 delta = delta[ij_pvt]
                 # Compute the updated alpha vector.
@@ -267,21 +276,16 @@ class sBOPDMDOperator(BOPDMDOperator):
                 alpha_updated = self._push_eigenvalues(alpha_updated)
                 return alpha_updated
 
-            # Take a step using our initial step size init_lambda.
-            alpha_new = step(_lambda)
-            obj_new = compute_objective(B, alpha_new)
+            for j in range(maxlam + 1):
+                # Scale lambda up every iteration.
+                lam = init_lambda * (lamup ** j)
 
-            # If the objective improved, terminate.
-            if obj_new < obj_0:
-                return alpha_new
+                # Take a step using our step size lam.
+                alpha_new = step(lam)
+                objective_new = compute_objective(B, alpha_new)
 
-            # Otherwise increase lambda until something works.
-            for _ in range(maxlam):
-                _lambda *= lamup
-                alpha_new = step(_lambda)
-                obj_new = compute_objective(B, alpha_new)
-
-                if obj_new < obj_0:
+                # If the objective improved, terminate.
+                if objective_new < objective:
                     return alpha_new
 
             # Terminate if no appropriate step length was found...
@@ -307,10 +311,10 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         for itr in range(maxiter):
             # Get the new optimal matrix B.
-            B_new = update_B(B, alpha)
+            B_new = compute_B(B, alpha)
 
             # Take a Levenberg-Marquardt step to update alpha.
-            alpha_new = update_alpha(B_new, alpha)
+            alpha_new = compute_alpha(B_new, alpha)
 
             # Get new objective and error values.
             all_obj[itr] = compute_objective(B_new, alpha_new)
@@ -384,7 +388,9 @@ class SparseBOPDMD(BOPDMD):
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
         eig_constraints: Union[set, Callable] = None,
-        bag_maxfail: int = -1,
+        remove_bad_bags: bool = False,
+        bag_warning: int = 100,
+        bag_maxfail: int = 200,
         varpro_opts_dict: dict = None,
     ):
         super().__init__(
@@ -398,6 +404,8 @@ class SparseBOPDMD(BOPDMD):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
+            remove_bad_bags=remove_bad_bags,
+            bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
             varpro_opts_dict=varpro_opts_dict,
         )
@@ -459,6 +467,8 @@ class SparseBOPDMD(BOPDMD):
             self._trial_size,
             self._eig_sort,
             self._eig_constraints,
+            self._remove_bad_bags,
+            self._bag_warning,
             self._bag_maxfail,
             **self._varpro_opts_dict,
         )
