@@ -104,6 +104,7 @@ class sBOPDMDOperator(BOPDMDOperator):
     """
     BOP-DMD operator with sparse modes.
     """
+
     def __init__(
         self,
         mode_regularizer,
@@ -158,7 +159,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["tol"] = prox_grad_tol
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
         self._prox_grad_params["use_restarts"] = prox_grad_restart
-
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
@@ -278,7 +278,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             for j in range(maxlam + 1):
                 # Scale lambda up every iteration.
-                lam = init_lambda * (lamup ** j)
+                lam = init_lambda * (lamup**j)
 
                 # Take a step using our step size lam.
                 alpha_new = step(lam)
