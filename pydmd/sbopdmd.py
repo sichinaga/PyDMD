@@ -216,7 +216,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             )
 
             if verbose:
-                # TODO: add a message for the user.
+                print("Prox Gradient Results:")
                 plt.figure(figsize=(8, 2))
                 plt.subplot(1, 2, 1)
                 plt.title("Objective")
@@ -298,12 +298,13 @@ class sBOPDMDOperator(BOPDMDOperator):
             return alpha_0
 
         # Initialize values.
-        alpha = init_alpha
+        alpha = self._push_eigenvalues(init_alpha)
         B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+
+        # Initialize storage for objective values and error.
+        # Note: "error" refers to differences in iterations.
         all_obj = np.empty(maxiter)
         all_err = np.empty(maxiter)
-        all_err_a = np.empty(maxiter)
-        all_err_b = np.empty(maxiter)
 
         # Initialize termination flags.
         converged = False
@@ -317,10 +318,10 @@ class sBOPDMDOperator(BOPDMDOperator):
             alpha_new = compute_alpha(B_new, alpha)
 
             # Get new objective and error values.
+            err_alpha = np.linalg.norm(alpha - alpha_new)
+            err_B = np.linalg.norm(B - B_new)
             all_obj[itr] = compute_objective(B_new, alpha_new)
-            all_err_a[itr] = np.linalg.norm(alpha - alpha_new)
-            all_err_b[itr] = np.linalg.norm(B - B_new)
-            all_err[itr] = all_err_a[itr] + all_err_b[itr]
+            all_err[itr] = err_alpha + err_B
 
             # Update information.
             np.copyto(alpha, alpha_new)
@@ -330,15 +331,17 @@ class sBOPDMDOperator(BOPDMDOperator):
             if verbose:
                 print(
                     f"Iteration {itr + 1}: "
-                    f"Objective = {all_obj[itr]} "
-                    f"Error (alpha) = {all_err_a[itr]} "
-                    f"Error (B) = {all_err_b[itr]}.\n"
+                    f"Objective = {np.round(all_obj[itr], decimals=3)} "
+                    f"Error (alpha) = {np.round(err_alpha, decimals=3)} "
+                    f"Error (B) = {np.round(err_B, decimals=3)}.\n"
                 )
 
             # Update termination status and terminate if converged or stalled.
             converged = all_err[itr] < tol
+            # Note: we may need to change to abs if this stall condition causes
+            # too many early terminations due to worsenig objectives.
             stalled = (itr > 0) and (
-                all_err[itr - 1] - all_err[itr] < eps_stall * all_err[itr - 1]
+                all_obj[itr - 1] - all_obj[itr] < eps_stall * all_obj[itr - 1]
             )
 
             if converged:
@@ -349,12 +352,12 @@ class sBOPDMDOperator(BOPDMDOperator):
             if stalled:
                 if verbose:
                     msg = (
-                        "Stall detected: error reduced by less than {} times "
-                        "the error at the previous step. Iteration {}. "
-                        "Current error {}. Consider increasing tol or "
-                        "decreasing eps_stall."
+                        "Stall detected: objective reduced by less than {} "
+                        "times the objective at the previous step. "
+                        "Iteration {}. Current objective {}. "
+                        "Consider decreasing eps_stall."
                     )
-                    print(msg.format(eps_stall, itr + 1, all_err[itr]))
+                    print(msg.format(eps_stall, itr + 1, all_obj[itr]))
                 return B, alpha, converged
 
         # Failed to meet tolerance in maxiter steps.
@@ -372,10 +375,13 @@ class SparseBOPDMD(BOPDMD):
     """
     Dynamic Mode Decomposition with sparse modes.
 
-    :param mode_regularizer:
-    :param mode_prox:
+    :param mode_regularizer: Regularizer portion of the objective function
+        given matrix input X.
+    :type mode_regularizer: function
+    :param mode_prox: Proximal operator of the given mode_regularizer function
+        given matrix input X and a constant float.
+    :type mode_prox: function
     """
-    # TODO: add documentation for the new parameters.
 
     def __init__(
         self,
