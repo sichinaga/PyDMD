@@ -218,7 +218,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         def compute_B(B0, alpha):
             """
             Use accelerated prox gradient to update B for the current alpha.
-            If split_mode_matrix is True, 
             """
             if self._split_mode_matrix:
                 B0_normalized, b = split_B(B0)
@@ -249,7 +248,15 @@ class sBOPDMDOperator(BOPDMDOperator):
             # B_updated has normalized rows -- reincorporate the amplitudes.
             if self._split_mode_matrix:
                 # Use the updated B to compute updated amplitudes.
-                b_updated = np.diag(np.linalg.multi_dot([np.linalg.pinv(Phi(alpha, t)), H, np.linalg.pinv(B_updated)]))
+                b_updated = np.diag(
+                    np.linalg.multi_dot(
+                        [
+                            np.linalg.pinv(Phi(alpha, t)),
+                            H,
+                            np.linalg.pinv(B_updated),
+                        ]
+                    )
+                )
                 B_updated = np.diag(b_updated).dot(B_updated)
 
             if verbose:
