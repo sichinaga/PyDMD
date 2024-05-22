@@ -14,6 +14,23 @@ from .snapshots import Snapshots
 from .utils import compute_rank, compute_svd
 
 
+def split_B(B):
+    """
+    Split the given amplitude-scaled mode matrix into a normalized mode
+    matrix and an array of mode amplitudes.
+    """
+    b = np.linalg.norm(B, axis=1)
+
+    # Remove extremely small-amplitude modes.
+    inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
+    b[inds_small] = 1.0
+    B = np.diag(1 / b).dot(B)
+    B[inds_small] = 0.0
+    b[inds_small] = 0.0
+
+    return B, b
+
+
 def accelerated_prox_grad(
     X0: np.ndarray,
     func_f: Callable,
@@ -74,7 +91,7 @@ def accelerated_prox_grad(
         # Proximal gradient descent step.
         X_new = prox_g(Y - step_size * grad_f(Y), step_size)
         if normalize_rows:
-            X_new = np.diag(1 / np.linalg.norm(X_new, axis=1)).dot(X_new)
+            X_new = split_B(X_new)[0]
 
         t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t**2))
         Y_new = X_new + ((t - 1.0) / t_new) * (X_new - X)
@@ -198,22 +215,6 @@ class sBOPDMDOperator(BOPDMDOperator):
             objective += self._mode_regularizer(B)
 
             return objective
-
-        def split_B(B):
-            """
-            Split the given amplitude-scaled mode matrix into a normalized mode
-            matrix and an array of mode amplitudes.
-            """
-            b = np.linalg.norm(B, axis=1)
-
-            # Remove extremely small-amplitude modes.
-            inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
-            b[inds_small] = 1.0
-            B = np.diag(1 / b).dot(B)
-            B[inds_small] = 0.0
-            b[inds_small] = 0.0
-
-            return B, b
 
         def compute_B(B0, alpha):
             """
