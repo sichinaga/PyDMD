@@ -24,6 +24,7 @@ def accelerated_prox_grad(
     tol: float,
     max_iter: int,
     use_restarts: bool,
+    normalize_rows: bool,
 ):
     """
     Accelerated Proximal Gradient Descent for
@@ -72,6 +73,9 @@ def accelerated_prox_grad(
     while err >= tol:
         # Proximal gradient descent step.
         X_new = prox_g(Y - step_size * grad_f(Y), step_size)
+        if normalize_rows:
+            X_new = np.diag(1 / np.linalg.norm(X_new, axis=1)).dot(X_new)
+
         t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t**2))
         Y_new = X_new + ((t - 1.0) / t_new) * (X_new - X)
 
@@ -109,6 +113,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         self,
         mode_regularizer,
         mode_prox,
+        split_mode_matrix,
         compute_A,
         use_proj,
         init_alpha,
@@ -153,16 +158,19 @@ class sBOPDMDOperator(BOPDMDOperator):
             verbose=verbose,
         )
         self._mode_regularizer = mode_regularizer
+        self._split_mode_matrix = split_mode_matrix
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
         self._prox_grad_params["tol"] = prox_grad_tol
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
         self._prox_grad_params["use_restarts"] = prox_grad_restart
+        self._prox_grad_params["normalize_rows"] = split_mode_matrix
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
         Variable projection routine for multivariate data with regularization.
+        Note: The B matrix always contains the amplitude-scaled modes.
         """
         # Define M, IS, and IA.
         M, IS = H.shape
@@ -191,22 +199,45 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return objective
 
+        def split_B(B):
+            """
+            Split the given amplitude-scaled mode matrix into a normalized mode
+            matrix and an array of mode amplitudes.
+            """
+            b = np.linalg.norm(B, axis=1)
+
+            # Remove extremely small-amplitude modes.
+            inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
+            b[inds_small] = 1.0
+            B = np.diag(1 / b).dot(B)
+            B[inds_small] = 0.0
+            b[inds_small] = 0.0
+
+            return B, b
+
         def compute_B(B0, alpha):
             """
             Use accelerated prox gradient to update B for the current alpha.
+            If split_mode_matrix is True, 
             """
-            Phi_matrix = Phi(alpha, t)
-            PhiH_Phi = Phi_matrix.conj().T.dot(Phi_matrix)
-            beta_f = np.linalg.norm(Phi_matrix, 2) ** 2
+            if self._split_mode_matrix:
+                B0_normalized, b = split_B(B0)
+                A = Phi(alpha, t).dot(np.diag(b))
+                init_B = B0_normalized
+            else:
+                A = Phi(alpha, t)
+                init_B = B0
 
-            def func_f(A):
-                return 0.5 * np.linalg.norm(H - Phi_matrix.dot(A), "fro") ** 2
+            beta_f = np.linalg.norm(A, 2) ** 2
 
-            def grad_f(A):
-                return PhiH_Phi.dot(A) - Phi_matrix.conj().T.dot(H)
+            def func_f(Z):
+                return 0.5 * np.linalg.norm(H - A.dot(Z), "fro") ** 2
+
+            def grad_f(Z):
+                return A.conj().T.dot(A.dot(Z) - H)
 
             B_updated, obj_hist, err_hist = accelerated_prox_grad(
-                B0,
+                init_B,
                 func_f,
                 self._mode_regularizer,
                 grad_f,
@@ -214,6 +245,12 @@ class sBOPDMDOperator(BOPDMDOperator):
                 beta_f,
                 **self._prox_grad_params,
             )
+
+            # B_updated has normalized rows -- reincorporate the amplitudes.
+            if self._split_mode_matrix:
+                # Use the updated B to compute updated amplitudes.
+                b_updated = np.diag(np.linalg.multi_dot([np.linalg.pinv(Phi(alpha, t)), H, np.linalg.pinv(B_updated)]))
+                B_updated = np.diag(b_updated).dot(B_updated)
 
             if verbose:
                 print("Prox Gradient Results:")
@@ -381,12 +418,17 @@ class SparseBOPDMD(BOPDMD):
     :param mode_prox: Proximal operator of the given mode_regularizer function
         given matrix input X and a constant float.
     :type mode_prox: function
+    :param split_mode_matrix: Whether or not to split the amplitudes from the
+        mode matrix when performing the optimization. Default behavior is to
+        combine the modes and the amplitudes during the optimization.
+    :type split_mode_matrix: bool
     """
 
     def __init__(
         self,
         mode_regularizer: Callable = None,
         mode_prox: Callable = None,
+        split_mode_matrix: bool = False,
         svd_rank: Number = 0,
         compute_A: bool = False,
         init_alpha: np.ndarray = None,
@@ -416,6 +458,7 @@ class SparseBOPDMD(BOPDMD):
             varpro_opts_dict=varpro_opts_dict,
         )
         self._mode_regularizer = mode_regularizer
+        self._split_mode_matrix = split_mode_matrix
 
     def fit(self, X, t):
         """
@@ -465,6 +508,7 @@ class SparseBOPDMD(BOPDMD):
         self._Atilde = sBOPDMDOperator(
             self._mode_regularizer,
             self._mode_prox,
+            self._split_mode_matrix,
             self._compute_A,
             self._use_proj,
             self._init_alpha,
