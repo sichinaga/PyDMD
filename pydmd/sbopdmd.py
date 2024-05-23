@@ -212,7 +212,11 @@ class sBOPDMDOperator(BOPDMDOperator):
             """
             residual = H - Phi(alpha, t).dot(B)
             objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
-            objective += self._mode_regularizer(B)
+            if self._split_mode_matrix:
+                B_normalized = split_B(B)[0]
+                objective += self._mode_regularizer(B_normalized)
+            else:
+                objective += self._mode_regularizer(B)
 
             return objective
 
