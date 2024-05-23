@@ -263,8 +263,8 @@ class sBOPDMDOperator(BOPDMDOperator):
                     )
                 )
                 # Hard threshold the amplitudes and make them real.
-                b_updated[np.abs(b_updated) ** 2 < 2 * 1e-6] = 0.0
                 b_updated = np.abs(b_updated)
+                b_updated[b_updated ** 2 < 2 * 1e-6] = 0.0
 
                 B_updated = np.diag(b_updated).dot(B_updated)
 
