@@ -260,7 +260,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                             H,
                             np.linalg.pinv(B_updated),
                         ]
-                    )
+                    ).real
                 )
                 B_updated = np.diag(b_updated).dot(B_updated)
 
