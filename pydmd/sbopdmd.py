@@ -260,8 +260,12 @@ class sBOPDMDOperator(BOPDMDOperator):
                             H,
                             np.linalg.pinv(B_updated),
                         ]
-                    ).real
+                    )
                 )
+                # Hard threshold the amplitudes and make them real.
+                b_updated[np.abs(b_updated) ** 2 < 2 * 1e-6] = 0.0
+                b_updated = np.abs(b_updated)
+
                 B_updated = np.diag(b_updated).dot(B_updated)
 
             if verbose:
