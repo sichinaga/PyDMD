@@ -4,6 +4,7 @@ Derived module from bopdmd.py for BOP-DMD with sparse modes.
 
 from numbers import Number
 from typing import Callable, Union
+from inspect import isfunction
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,112 +14,19 @@ from .bopdmd import BOPDMD, BOPDMDOperator
 from .snapshots import Snapshots
 from .utils import compute_rank, compute_svd
 
-
-def split_B(B):
-    """
-    Split the given amplitude-scaled mode matrix into a normalized mode
-    matrix and an array of mode amplitudes.
-    """
-    b = np.linalg.norm(B, axis=1)
-
-    # Remove extremely small-amplitude modes.
-    inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
-    b[inds_small] = 1.0
-    B = np.diag(1 / b).dot(B)
-    B[inds_small] = 0.0
-    b[inds_small] = 0.0
-
-    return B, b
-
-
-def accelerated_prox_grad(
-    X0: np.ndarray,
-    func_f: Callable,
-    func_g: Callable,
-    grad_f: Callable,
-    prox_g: Callable,
-    beta_f: float,
-    tol: float,
-    max_iter: int,
-    use_restarts: bool,
-    normalize_rows: bool,
-):
-    """
-    Accelerated Proximal Gradient Descent for
-        min_X f(X) + g(X)
-    where f is beta smooth and g is proxable.
-
-    :param X0: Initial value for the solver.
-    :type X0: np.ndarray
-    :param func_f: Smooth portion of the objective function.
-    :type func_f: function
-    :param func_g: Regularizer portion of the objective function.
-    :type func_g: function
-    :param grad_f: Gradient of f with respect to X.
-    :type grad_f: function
-    :param prox_g: Proximal operator of g given X and a constant float.
-    :type prox_g: function
-    :param beta_f: Beta smoothness constant for f.
-    :type beta_f: float
-    :param tol: Tolerance for terminating the solver.
-    :type tol: float
-    :param max_iter: Maximum number of iterations for the solver.
-    :type max_iter: int
-    :param use_restarts: Whether or not to reset t when the objective
-        function value worsens.
-    :type use_restarts: bool
-
-    :return: Tuple consisting of the following components:
-        1. Final optimal solution.
-        2. Objective value history across iterations.
-        3. Convergece history across iterations.
-    :rtype: Tuple[np.ndarray, list, list]
-    """
-    # Set initial values.
-    X = X0.copy()
-    Y = X0.copy()
-    t = 1.0
-
-    step_size = 1.0 / beta_f
-    obj_hist = np.empty(max_iter)
-    err_hist = np.empty(max_iter)
-
-    # Start iteration.
-    iter_count = 0
-    err = tol + 1.0
-
-    while err >= tol:
-        # Proximal gradient descent step.
-        X_new = prox_g(Y - step_size * grad_f(Y), step_size)
-        if normalize_rows:
-            X_new = split_B(X_new)[0]
-
-        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t**2))
-        Y_new = X_new + ((t - 1.0) / t_new) * (X_new - X)
-
-        # Get new objective and error values.
-        obj = func_f(X_new) + func_g(X_new)
-        err = np.linalg.norm(X - X_new)
-        obj_hist[iter_count] = obj
-        err_hist[iter_count] = err
-
-        # Update information.
-        np.copyto(X, X_new)
-        np.copyto(Y, Y_new)
-        t = t_new
-
-        # Reset t if objective function value is getting worse.
-        if use_restarts and iter_count > 1:
-            if obj_hist[iter_count - 1] < obj_hist[iter_count]:
-                t = 1.0
-
-        # Check if exceed maximum number of iterations.
-        iter_count += 1
-        if iter_count >= max_iter:
-            print("Proximal gradient descent reached maximum iterations.")
-            return X, obj_hist[:iter_count], err_hist[:iter_count]
-
-    return X, obj_hist[:iter_count], err_hist[:iter_count]
+from .sbopdmd_utils import (
+    L0_norm,
+    L1_norm,
+    L2_norm,
+    L2_norm_squared,
+    hard_threshold,
+    soft_threshold,
+    group_lasso,
+    scaled_hard_threshold,
+    scaled_soft_threshold,
+    split_B,
+    accelerated_prox_grad,
+)
 
 
 class sBOPDMDOperator(BOPDMDOperator):
@@ -425,8 +333,23 @@ class SparseBOPDMD(BOPDMD):
     Dynamic Mode Decomposition with sparse modes.
 
     :param mode_regularizer: Regularizer portion of the objective function
-        given matrix input X.
-    :type mode_regularizer: function
+        given matrix input X. Can be a function, or one of the following preset
+        regularizers. Note that if a preset regularizer is used, the mode_prox
+        function will be precomputed and will not need to be provided by the
+        user. Use regularizer_params instead if using a preset.
+        - "l0" (scaled L0 norm)
+        - "l1" (scaled L1 norm)
+        - "l2" (scaled L2 norm)
+        - "l02" (scaled L0 norm + scaled L2 norm squared)
+        - "l12" (scaled L1 norm + scaled L2 norm squared)
+    :type mode_regularizer: str or function
+    :param regularizer_params: Dictionary of parameters for the mode
+        regularizer to be used if a preset regularizer is requested.
+        - "lambda" - Scaling for the first norm term (used by all presets).
+            Defaults to 1.0.
+        - "lambda_2" - Scaling for the L2 norm squared (used by "l02", "l12").
+            Defaults to 1e-6.
+    :type regularizer_params: dict
     :param mode_prox: Proximal operator of the given mode_regularizer function
         given matrix input X and a constant float.
     :type mode_prox: function
@@ -438,7 +361,8 @@ class SparseBOPDMD(BOPDMD):
 
     def __init__(
         self,
-        mode_regularizer: Callable = None,
+        mode_regularizer: Union[str, Callable] = None,
+        regularizer_params: dict = None,
         mode_prox: Callable = None,
         split_mode_matrix: bool = False,
         svd_rank: Number = 0,
@@ -470,7 +394,77 @@ class SparseBOPDMD(BOPDMD):
             varpro_opts_dict=varpro_opts_dict,
         )
         self._mode_regularizer = mode_regularizer
+        self._regularizer_params = regularizer_params
         self._split_mode_matrix = split_mode_matrix
+
+        if self._regularizer_params is None:
+            self._regularizer_params = {}
+        if "lambda" not in self._regularizer_params:
+            self._regularizer_params["lambda"] = 1.0
+        if "lambda_2" not in self._regularizer_params:
+            self._regularizer_params["lambda_2"] = 1e-6
+
+    def mode_regularizer(self, X):
+        """
+        Apply the mode regularizer to the matrix X.
+        """
+        if isfunction(self._mode_regularizer):
+            return self._mode_regularizer(X)
+
+        if self._mode_regularizer == "l0":
+            return self._regularizer_params["lambda"] * L0_norm(X)
+
+        if self._mode_regularizer == "l1":
+            return self._regularizer_params["lambda"] * L1_norm(X)
+
+        if self._mode_regularizer == "l2":
+            return self._regularizer_params["lambda"] * L2_norm(X)
+
+        if self._mode_regularizer == "l02":
+            return self._regularizer_params["lambda"] * L0_norm(
+                X
+            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
+
+        if self._mode_regularizer == "l12":
+            return self._regularizer_params["lambda"] * L1_norm(
+                X
+            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
+
+        raise ValueError("Invalid mode_regularizer provided.")
+
+    def mode_prox(self, X, t):
+        """
+        Apply the proximal operator to the matrix X with scaling t.
+        """
+        if isfunction(self._mode_prox):
+            return self._mode_prox(X, t)
+
+        if self._mode_regularizer == "l0":
+            return hard_threshold(X, self._regularizer_params["lambda"] * t)
+
+        if self._mode_regularizer == "l1":
+            return soft_threshold(X, self._regularizer_params["lambda"] * t)
+
+        if self._mode_regularizer == "l2":
+            return group_lasso(X, self._regularizer_params["lambda"] * t)
+
+        if self._mode_regularizer == "l02":
+            return scaled_hard_threshold(
+                X,
+                t,
+                self._regularizer_params["lambda"],
+                self._regularizer_params["lambda_2"],
+            )
+
+        if self._mode_regularizer == "l12":
+            return scaled_soft_threshold(
+                X,
+                t,
+                self._regularizer_params["lambda"],
+                self._regularizer_params["lambda_2"],
+            )
+
+        raise ValueError("Invalid mode_regularizer provided.")
 
     def fit(self, X, t):
         """
@@ -518,8 +512,8 @@ class SparseBOPDMD(BOPDMD):
 
         # Build the operator now that the initial alpha has been defined.
         self._Atilde = sBOPDMDOperator(
-            self._mode_regularizer,
-            self._mode_prox,
+            self.mode_regularizer,
+            self.mode_prox,
             self._split_mode_matrix,
             self._compute_A,
             self._use_proj,
