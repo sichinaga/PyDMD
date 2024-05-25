@@ -42,6 +42,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         compute_A,
         use_proj,
         init_alpha,
+        init_B,
         proj_basis,
         num_trials,
         trial_size,
@@ -84,6 +85,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         )
         self._mode_regularizer = mode_regularizer
         self._split_mode_matrix = split_mode_matrix
+        self._init_B = init_B
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
@@ -135,10 +137,10 @@ class sBOPDMDOperator(BOPDMDOperator):
             if self._split_mode_matrix:
                 B0_normalized, b = split_B(B0)
                 A = Phi(alpha, t).dot(np.diag(b))
-                init_B = B0_normalized
+                init_B0 = B0_normalized
             else:
                 A = Phi(alpha, t)
-                init_B = B0
+                init_B0 = B0
 
             beta_f = np.linalg.norm(A, 2) ** 2
 
@@ -149,7 +151,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                 return A.conj().T.dot(A.dot(Z) - H)
 
             B_updated, obj_hist, err_hist = accelerated_prox_grad(
-                init_B,
+                init_B0,
                 func_f,
                 self._mode_regularizer,
                 grad_f,
@@ -256,7 +258,10 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         # Initialize values.
         alpha = self._push_eigenvalues(init_alpha)
-        B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+        if self._init_B is None:
+            B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+        else:
+            B = np.copy(self._init_B)
 
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
@@ -368,6 +373,7 @@ class SparseBOPDMD(BOPDMD):
         svd_rank: Number = 0,
         compute_A: bool = False,
         init_alpha: np.ndarray = None,
+        init_B: np.ndarray = None,
         num_trials: int = 0,
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
@@ -396,6 +402,7 @@ class SparseBOPDMD(BOPDMD):
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
         self._split_mode_matrix = split_mode_matrix
+        self._init_B = init_B
 
         if self._regularizer_params is None:
             self._regularizer_params = {}
@@ -518,6 +525,7 @@ class SparseBOPDMD(BOPDMD):
             self._compute_A,
             self._use_proj,
             self._init_alpha,
+            self._init_B,
             self._proj_basis,
             self._num_trials,
             self._trial_size,
