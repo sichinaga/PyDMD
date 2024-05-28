@@ -242,7 +242,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
                     "Consider increasing maxlam or changing lamup."
                 )
 
-            return alpha_0
+            return alpha_0, b_0
 
         # Initialize values.
         alpha = self._push_eigenvalues(init_alpha)
