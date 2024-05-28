@@ -183,7 +183,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
             residual = H - np.linalg.multi_dot([Phi(alpha_0, t), np.diag(b_0), B])
 
             for i in range(ia):
-                djac_matrix[:, i] = np.linalg.multi_dot([dPhi(alpha_0, t, i), np.diag(b_0), B]).ravel(order="F")
+                djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(np.diag(b_0)).dot(B).ravel(order="F")
                 # Scale for the Levenberg-Marquardt algorithm.
                 scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
                 scales[i] = max(scales[i], 1e-6)
