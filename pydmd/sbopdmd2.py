@@ -277,6 +277,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
             # Update information.
             np.copyto(alpha, alpha_new)
             np.copyto(B, B_new)
+            np.copyto(b, b_new)
 
             # Print iterative progress if the verbose flag is turned on.
             if verbose:
@@ -298,7 +299,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
             if converged:
                 if verbose:
                     print("Convergence reached!")
-                return B, alpha, converged
+                return np.diag(b).dot(B), alpha, converged
 
             if stalled:
                 if verbose:
@@ -309,7 +310,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
                         "Consider decreasing eps_stall."
                     )
                     print(msg.format(eps_stall, itr + 1, all_obj[itr]))
-                return B, alpha, converged
+                return np.diag(b).dot(B), alpha, converged
 
         # Failed to meet tolerance in maxiter steps.
         if verbose:
@@ -319,7 +320,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
             )
             print(msg.format(maxiter, all_err[itr]))
 
-        return B, alpha, converged
+        return np.diag(b).dot(B), alpha, converged
 
 
 class SparseBOPDMD2(SparseBOPDMD):
