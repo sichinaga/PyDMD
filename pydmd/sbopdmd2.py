@@ -80,7 +80,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
         self._prox_grad_params["use_restarts"] = prox_grad_restart
         self._prox_grad_params["normalize_rows"] = True
 
-    def _exp_function(self, alpha, t, i):
+    def _exp_function2(self, alpha, t, i):
         """
         Derivatives of the matrix of exponentials.
 
@@ -189,7 +189,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
                 scales[i] = max(scales[i], 1e-6)
 
             for i in range(ia):
-                djac_matrix[:, i + ia] = self._exp_function(alpha_0, t, i).dot(B).ravel(order="F")
+                djac_matrix[:, i + ia] = self._exp_function2(alpha_0, t, i).dot(B).ravel(order="F")
                 scales[i + ia] = min(np.linalg.norm(djac_matrix[:, i + ia]), 1)
                 scales[i + ia] = max(scales[i + ia], 1e-6)
 
