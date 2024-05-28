@@ -4,31 +4,20 @@ Derived module from bopdmd.py for BOP-DMD with sparse modes.
 
 from numbers import Number
 from typing import Callable, Union
-from inspect import isfunction
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import qr
+from scipy.sparse import csr_matrix
 
-from .bopdmd import BOPDMD, BOPDMDOperator
+from .bopdmd import BOPDMDOperator
+from .sbopdmd import SparseBOPDMD
 from .snapshots import Snapshots
 from .utils import compute_rank, compute_svd
-
-from .sbopdmd_utils import (
-    L0_norm,
-    L1_norm,
-    L2_norm,
-    L2_norm_squared,
-    hard_threshold,
-    soft_threshold,
-    group_lasso,
-    scaled_hard_threshold,
-    scaled_soft_threshold,
-    accelerated_prox_grad,
-)
+from .sbopdmd_utils import accelerated_prox_grad, split_B
 
 
-class sBOPDMDOperator(BOPDMDOperator):
+class sBOPDMDOperator2(BOPDMDOperator):
     """
     BOP-DMD operator with sparse modes.
     """
@@ -89,16 +78,37 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["tol"] = prox_grad_tol
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
         self._prox_grad_params["use_restarts"] = prox_grad_restart
-        self._prox_grad_params["normalize_rows"] = False
+        self._prox_grad_params["normalize_rows"] = True
+
+    def _exp_function(self, alpha, t, i):
+        """
+        Derivatives of the matrix of exponentials.
+
+        :param alpha: Vector of time scalings in the exponent.
+        :type alpha: numpy.ndarray
+        :param t: Vector of time values.
+        :type t: numpy.ndarray
+        :param i: Index in alpha of the derivative variable.
+        :type i: int
+        :return: Derivatives of Phi(alpha, t) with respect to alpha[i].
+        :rtype: scipy.sparse.csr_matrix
+        """
+        m = len(t)
+        n = len(alpha)
+        A = np.exp(alpha[i] * t)
+        return csr_matrix(
+            (A, (np.arange(m), np.full(m, fill_value=i))), shape=(m, n)
+        )
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
         Variable projection routine for multivariate data with regularization.
-        Note: The B matrix always contains the amplitude-scaled modes.
+        Note: The B matrix is no longer amplitude-scaled.
         """
         # Define M, IS, and IA.
         M, IS = H.shape
-        IA = len(init_alpha)
+        IA = 2 * len(init_alpha)
+        ia = len(init_alpha)
 
         # Unpack all variable projection parameters stored in varpro_opts.
         (
@@ -113,21 +123,21 @@ class sBOPDMDOperator(BOPDMDOperator):
             verbose,
         ) = self._varpro_opts
 
-        def compute_objective(B, alpha):
+        def compute_objective(B, alpha, b):
             """
             Compute the current objective.
             """
-            residual = H - Phi(alpha, t).dot(B)
+            residual = H - np.linalg.multi_dot([Phi(alpha, t), np.diag(b), B])
             objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
             objective += self._mode_regularizer(B)
 
             return objective
 
-        def compute_B(B0, alpha):
+        def compute_B(B0, alpha, b):
             """
             Use accelerated prox gradient to update B for the current alpha.
             """
-            A = Phi(alpha, t)
+            A = Phi(alpha, t).dot(np.diag(b))
             beta_f = np.linalg.norm(A, 2) ** 2
 
             def func_f(Z):
@@ -162,22 +172,26 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return B_updated
 
-        def compute_alpha(B, alpha_0):
+        def compute_alpha(B, alpha_0, b_0):
             """
             Use Levenberg-Marquardt to step alpha for the current B.
             """
             djac_matrix = np.zeros((M * IS, IA), dtype="complex")
             rjac = np.zeros((2 * IA, IA), dtype="complex")
             scales = np.zeros(IA)
-            objective = compute_objective(B, alpha_0)
-            residual = H - Phi(alpha_0, t).dot(B)
+            objective = compute_objective(B, alpha_0, b_0)
+            residual = H - np.linalg.multi_dot([Phi(alpha_0, t), np.diag(b_0), B])
 
-            for i in range(IA):
-                # Build the Jacobian matrix by looping over all alpha indices.
-                djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
+            for i in range(ia):
+                djac_matrix[:, i] = np.linalg.multi_dot([dPhi(alpha_0, t, i), np.diag(b_0), B]).ravel(order="F")
                 # Scale for the Levenberg-Marquardt algorithm.
                 scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
                 scales[i] = max(scales[i], 1e-6)
+
+            for i in range(ia):
+                djac_matrix[:, i + ia] = self._exp_function(alpha_0, t, i).dot(B).ravel(order="F")
+                scales[i + ia] = min(np.linalg.norm(djac_matrix[:, i + ia]), 1)
+                scales[i + ia] = max(scales[i + ia], 1e-6)
 
             # Loop to determine lambda (the step-size parameter).
             rhs_temp = residual.ravel(order="F")[:, None]
@@ -202,22 +216,24 @@ class sBOPDMDOperator(BOPDMDOperator):
                 rjac[IA:] = _lambda * np.diag(scales_pvt)
                 delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
                 delta = delta[ij_pvt]
-                # Compute the updated alpha vector.
-                alpha_updated = alpha_0.ravel() + delta.ravel()
+                # Compute the updated gamma vector.
+                gamma_updated = np.concatenate([alpha_0.ravel(), b_0.ravel()]) + delta.ravel()
+                alpha_updated = gamma_updated[:ia]
                 alpha_updated = self._push_eigenvalues(alpha_updated)
-                return alpha_updated
+                b_updated = gamma_updated[ia:]
+                return alpha_updated, b_updated
 
             for j in range(maxlam + 1):
                 # Scale lambda up every iteration.
                 lam = init_lambda * (lamup**j)
 
                 # Take a step using our step size lam.
-                alpha_new = step(lam)
-                objective_new = compute_objective(B, alpha_new)
+                alpha_new, b_new = step(lam)
+                objective_new = compute_objective(B, alpha_new, b_new)
 
                 # If the objective improved, terminate.
                 if objective_new < objective:
-                    return alpha_new
+                    return alpha_new, b_new
 
             # Terminate if no appropriate step length was found...
             if verbose:
@@ -234,6 +250,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
         else:
             B = np.copy(self._init_B)
+        B, b = split_B(B)
 
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
@@ -246,15 +263,15 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         for itr in range(maxiter):
             # Get the new optimal matrix B.
-            B_new = compute_B(B, alpha)
+            B_new = compute_B(B, alpha, b)
 
             # Take a Levenberg-Marquardt step to update alpha.
-            alpha_new = compute_alpha(B_new, alpha)
+            alpha_new, b_new = compute_alpha(B_new, alpha, b)
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
             err_B = np.linalg.norm(B - B_new)
-            all_obj[itr] = compute_objective(B_new, alpha_new)
+            all_obj[itr] = compute_objective(B_new, alpha_new, b_new)
             all_err[itr] = err_alpha + err_B
 
             # Update information.
@@ -305,7 +322,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         return B, alpha, converged
 
 
-class SparseBOPDMD(BOPDMD):
+class SparseBOPDMD2(SparseBOPDMD):
     """
     Dynamic Mode Decomposition with sparse modes.
 
@@ -351,93 +368,22 @@ class SparseBOPDMD(BOPDMD):
         varpro_opts_dict: dict = None,
     ):
         super().__init__(
+            mode_regularizer=mode_regularizer,
+            regularizer_params=regularizer_params,
+            mode_prox=mode_prox,
             svd_rank=svd_rank,
             compute_A=compute_A,
-            use_proj=False,  # don't project the data
             init_alpha=init_alpha,
-            proj_basis=None,  # ignore since we don't project the data
+            init_B=init_B,
             num_trials=num_trials,
             trial_size=trial_size,
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
-            mode_prox=mode_prox,
             remove_bad_bags=remove_bad_bags,
             bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
             varpro_opts_dict=varpro_opts_dict,
         )
-        self._mode_regularizer = mode_regularizer
-        self._regularizer_params = regularizer_params
-        self._init_B = init_B
-
-        if self._regularizer_params is None:
-            self._regularizer_params = {}
-        if "lambda" not in self._regularizer_params:
-            self._regularizer_params["lambda"] = 1.0
-        if "lambda_2" not in self._regularizer_params:
-            self._regularizer_params["lambda_2"] = 1e-6
-
-    def mode_regularizer(self, X):
-        """
-        Apply the mode regularizer to the matrix X.
-        """
-        if isfunction(self._mode_regularizer):
-            return self._mode_regularizer(X)
-
-        if self._mode_regularizer == "l0":
-            return self._regularizer_params["lambda"] * L0_norm(X)
-
-        if self._mode_regularizer == "l1":
-            return self._regularizer_params["lambda"] * L1_norm(X)
-
-        if self._mode_regularizer == "l2":
-            return self._regularizer_params["lambda"] * L2_norm(X)
-
-        if self._mode_regularizer == "l02":
-            return self._regularizer_params["lambda"] * L0_norm(
-                X
-            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
-
-        if self._mode_regularizer == "l12":
-            return self._regularizer_params["lambda"] * L1_norm(
-                X
-            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
-
-        raise ValueError("Invalid mode_regularizer provided.")
-
-    def mode_prox(self, X, t):
-        """
-        Apply the proximal operator to the matrix X with scaling t.
-        """
-        if isfunction(self._mode_prox):
-            return self._mode_prox(X, t)
-
-        if self._mode_regularizer == "l0":
-            return hard_threshold(X, self._regularizer_params["lambda"] * t)
-
-        if self._mode_regularizer == "l1":
-            return soft_threshold(X, self._regularizer_params["lambda"] * t)
-
-        if self._mode_regularizer == "l2":
-            return group_lasso(X, self._regularizer_params["lambda"] * t)
-
-        if self._mode_regularizer == "l02":
-            return scaled_hard_threshold(
-                X,
-                t,
-                self._regularizer_params["lambda"],
-                self._regularizer_params["lambda_2"],
-            )
-
-        if self._mode_regularizer == "l12":
-            return scaled_soft_threshold(
-                X,
-                t,
-                self._regularizer_params["lambda"],
-                self._regularizer_params["lambda_2"],
-            )
-
-        raise ValueError("Invalid mode_regularizer provided.")
 
     def fit(self, X, t):
         """
@@ -484,7 +430,7 @@ class SparseBOPDMD(BOPDMD):
             raise ValueError(msg.format(self._svd_rank))
 
         # Build the operator now that the initial alpha has been defined.
-        self._Atilde = sBOPDMDOperator(
+        self._Atilde = sBOPDMDOperator2(
             self.mode_regularizer,
             self.mode_prox,
             self._compute_A,
