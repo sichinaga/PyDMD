@@ -220,7 +220,7 @@ class sBOPDMDOperator2(BOPDMDOperator):
                 gamma_updated = np.concatenate([alpha_0.ravel(), b_0.ravel()]) + delta.ravel()
                 alpha_updated = gamma_updated[:ia]
                 alpha_updated = self._push_eigenvalues(alpha_updated)
-                b_updated = gamma_updated[ia:]
+                b_updated = gamma_updated[ia:].real
                 return alpha_updated, b_updated
 
             for j in range(maxlam + 1):
