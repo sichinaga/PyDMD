@@ -262,6 +262,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         for itr in range(maxiter):
             # Get the new optimal matrix B.
             if self._use_mask:
+                B_new = np.zeros(B.shape, dtype="complex")
                 self._unmasked = get_nonzero_cols(B)
                 B_new[:, self._unmasked] = compute_B(
                     B[:, self._unmasked], alpha, H[:, self._unmasked]
