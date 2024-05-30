@@ -106,6 +106,14 @@ def split_B(B: np.ndarray):
     return B, b
 
 
+def get_nonzero_cols(X, tol=1e-16):
+    """
+    Return the indices of the columns of X that are not the zero vector.
+    """
+    X[np.abs(X) < tol] = 0.0
+    return np.nonzero(np.any(X, axis=0))[0]
+
+
 def accelerated_prox_grad(
     X0: np.ndarray,
     func_f: Callable,

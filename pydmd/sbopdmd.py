@@ -26,6 +26,7 @@ from .sbopdmd_utils import (
     scaled_soft_threshold,
     accelerated_prox_grad,
     split_B,
+    get_nonzero_cols,
 )
 
 
@@ -37,9 +38,9 @@ class sBOPDMDOperator(BOPDMDOperator):
     def __init__(
         self,
         mode_regularizer,
-        mode_prox,
         compute_A,
         use_proj,
+        use_mask,
         init_alpha,
         init_B,
         proj_basis,
@@ -47,6 +48,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         trial_size,
         eig_sort,
         eig_constraints,
+        mode_prox,
         remove_bad_bags,
         bag_warning,
         bag_maxfail,
@@ -84,6 +86,10 @@ class sBOPDMDOperator(BOPDMDOperator):
         )
         self._mode_regularizer = mode_regularizer
         self._init_B = init_B
+
+        # Information for pixel masking.
+        self._use_mask = use_mask
+        self._unmasked = None
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
@@ -255,7 +261,13 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         for itr in range(maxiter):
             # Get the new optimal matrix B.
-            B_new = compute_B(B, alpha, H)
+            if self._use_mask:
+                self._unmasked = get_nonzero_cols(B)
+                B_new[:, self._unmasked] = compute_B(
+                    B[:, self._unmasked], alpha, H[:, self._unmasked]
+                )
+            else:
+                B_new = compute_B(B, alpha, H)
 
             # Take a Levenberg-Marquardt step to update alpha.
             if self._use_proj:
@@ -378,10 +390,10 @@ class SparseBOPDMD(BOPDMD):
         self,
         mode_regularizer: Union[str, Callable] = None,
         regularizer_params: dict = None,
-        mode_prox: Callable = None,
         svd_rank: Number = 0,
         compute_A: bool = False,
         use_proj: bool = False,
+        use_mask: bool = False,
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
@@ -389,6 +401,7 @@ class SparseBOPDMD(BOPDMD):
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
         eig_constraints: Union[set, Callable] = None,
+        mode_prox: Callable = None,
         remove_bad_bags: bool = False,
         bag_warning: int = 100,
         bag_maxfail: int = 200,
@@ -412,6 +425,7 @@ class SparseBOPDMD(BOPDMD):
         )
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
+        self._use_mask = use_mask
         self._init_B = init_B
 
         if self._regularizer_params is None:
@@ -540,9 +554,9 @@ class SparseBOPDMD(BOPDMD):
         # Build the operator now that the initial alpha has been defined.
         self._Atilde = sBOPDMDOperator(
             self.mode_regularizer,
-            self.mode_prox,
             self._compute_A,
             self._use_proj,
+            self._use_mask,
             self._init_alpha,
             self._init_B,
             self._proj_basis,
@@ -550,6 +564,7 @@ class SparseBOPDMD(BOPDMD):
             self._trial_size,
             self._eig_sort,
             self._eig_constraints,
+            self.mode_prox,
             self._remove_bad_bags,
             self._bag_warning,
             self._bag_maxfail,
