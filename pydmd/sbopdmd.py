@@ -96,9 +96,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         Variable projection routine for multivariate data with regularization.
         Note: The B matrix always contains the amplitude-scaled modes.
         """
-        # Define M, IS, and IA.
-        M, IS = H.shape
-        IA = len(init_alpha)
 
         # Unpack all variable projection parameters stored in varpro_opts.
         (
@@ -113,7 +110,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             verbose,
         ) = self._varpro_opts
 
-        def compute_objective(B, alpha):
+        def compute_objective(B, alpha, H):
             """
             Compute the current objective.
             """
@@ -166,10 +163,19 @@ class sBOPDMDOperator(BOPDMDOperator):
             """
             Use Levenberg-Marquardt to step alpha for the current B.
             """
+            # Start by projecting the data if requested.
+            if self._use_proj:
+                B = B.dot(self._proj_basis.conj())
+                H = H.dot(self._proj_basis.conj())
+
+            # Define M, IS, and IA.
+            M, IS = H.shape
+            IA = len(init_alpha)
+
             djac_matrix = np.zeros((M * IS, IA), dtype="complex")
             rjac = np.zeros((2 * IA, IA), dtype="complex")
             scales = np.zeros(IA)
-            objective = compute_objective(B, alpha_0)
+            objective = compute_objective(B, alpha_0, H)
             residual = H - Phi(alpha_0, t).dot(B)
 
             for i in range(IA):
@@ -213,7 +219,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
                 # Take a step using our step size lam.
                 alpha_new = step(lam)
-                objective_new = compute_objective(B, alpha_new)
+                objective_new = compute_objective(B, alpha_new, H)
 
                 # If the objective improved, terminate.
                 if objective_new < objective:
@@ -254,7 +260,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
             err_B = np.linalg.norm(B - B_new)
-            all_obj[itr] = compute_objective(B_new, alpha_new)
+            all_obj[itr] = compute_objective(B_new, alpha_new, H)
             all_err[itr] = err_alpha + err_B
 
             # Update information.
@@ -339,8 +345,10 @@ class SparseBOPDMD(BOPDMD):
         mode_prox: Callable = None,
         svd_rank: Number = 0,
         compute_A: bool = False,
+        use_proj: bool = False,
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
+        proj_basis: np.ndarray = None,
         num_trials: int = 0,
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
@@ -353,9 +361,9 @@ class SparseBOPDMD(BOPDMD):
         super().__init__(
             svd_rank=svd_rank,
             compute_A=compute_A,
-            use_proj=False,  # don't project the data
+            use_proj=use_proj,
             init_alpha=init_alpha,
-            proj_basis=None,  # ignore since we don't project the data
+            proj_basis=proj_basis,
             num_trials=num_trials,
             trial_size=trial_size,
             eig_sort=eig_sort,
@@ -470,7 +478,17 @@ class SparseBOPDMD(BOPDMD):
         self._svd_rank = int(compute_rank(self.snapshots, self._svd_rank))
 
         # Set/check the projection basis.
-        self._proj_basis = compute_svd(self.snapshots, -1)[0]
+        if self._proj_basis is None and self._use_proj:
+            self._proj_basis = compute_svd(self.snapshots, self._svd_rank)[0]
+        elif self._proj_basis is None and not self._use_proj:
+            self._proj_basis = compute_svd(self.snapshots, -1)[0]
+        elif (
+            not isinstance(self._proj_basis, np.ndarray)
+            or self._proj_basis.ndim != 2
+            or self._proj_basis.shape[1] != self._svd_rank
+        ):
+            msg = "proj_basis must be a 2D np.ndarray with {} columns."
+            raise ValueError(msg.format(self._svd_rank))
 
         # Set/check the initial guess for the continuous-time DMD eigenvalues.
         if self._init_alpha is None:
