@@ -98,6 +98,9 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["use_restarts"] = prox_grad_restart
         self._prox_grad_params["normalize_rows"] = False
 
+    def unmasked_indices(self):
+        return self._unmasked
+
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
         Variable projection routine for multivariate data with regularization.
@@ -497,6 +500,11 @@ class SparseBOPDMD(BOPDMD):
             )
 
         raise ValueError("Invalid mode_regularizer provided.")
+
+    def mask(self):
+        M = np.ones(self.snapshots.shape[0])
+        M[self.operator.unmasked_indices] = 0.0
+        return M.reshape(self.snapshots_shape)
 
     def fit(self, X, t):
         """
