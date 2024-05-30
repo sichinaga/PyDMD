@@ -164,10 +164,6 @@ class sBOPDMDOperator(BOPDMDOperator):
             """
             Use Levenberg-Marquardt to step alpha for the current B.
             """
-            # Start by projecting the data if requested.
-            if self._use_proj:
-                B = B.dot(self._proj_basis.conj())
-                H = H.dot(self._proj_basis.conj())
 
             # Define M, IS, and IA.
             M, IS = H.shape
@@ -235,8 +231,14 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return alpha_0
 
-        # Initialize values.
+        # Set the projected data if requested.
+        if self._use_proj:
+            H_proj = H.dot(self._proj_basis.conj())
+
+        # Initialize alpha.
         alpha = self._push_eigenvalues(init_alpha)
+
+        # Initialize B.
         if self._init_B is None:
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
         else:
@@ -256,7 +258,11 @@ class sBOPDMDOperator(BOPDMDOperator):
             B_new = compute_B(B, alpha, H)
 
             # Take a Levenberg-Marquardt step to update alpha.
-            alpha_new = compute_alpha(B_new, alpha, H)
+            if self._use_proj:
+                B_new_proj = B_new.dot(self._proj_basis.conj())
+                alpha_new = compute_alpha(B_new_proj, alpha, H_proj)
+            else:
+                alpha_new = compute_alpha(B_new, alpha, H)
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
