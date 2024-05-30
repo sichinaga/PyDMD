@@ -25,6 +25,7 @@ from .sbopdmd_utils import (
     scaled_hard_threshold,
     scaled_soft_threshold,
     accelerated_prox_grad,
+    split_B,
 )
 
 
@@ -309,6 +310,35 @@ class sBOPDMDOperator(BOPDMDOperator):
             print(msg.format(maxiter, all_err[itr]))
 
         return B, alpha, converged
+
+    def _single_trial_compute_operator(self, H, t, init_alpha):
+        """
+        Helper function that computes the standard optimized dmd operator.
+        Returns the resulting DMD modes, eigenvalues, amplitudes, reduced
+        system matrix, full system matrix, and whether or not convergence
+        of the variable projection routine was reached.
+        """
+        B, alpha, converged = self._variable_projection(
+            H, t, init_alpha, self._exp_function, self._exp_function_deriv
+        )
+        # Save the modes, eigenvalues, and amplitudes respectively.
+        B, b = split_B(B)
+        w = B.T
+        e = alpha
+
+        # Compute the projected propagator Atilde.
+        w_proj = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot(
+            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
+        )
+
+        # Compute the full system matrix A.
+        if self._compute_A:
+            A = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
+        else:
+            A = None
+
+        return w, e, b, Atilde, A, converged
 
 
 class SparseBOPDMD(BOPDMD):
