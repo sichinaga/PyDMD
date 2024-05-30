@@ -98,7 +98,11 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["use_restarts"] = prox_grad_restart
         self._prox_grad_params["normalize_rows"] = False
 
+    @property
     def unmasked_indices(self):
+        """
+        Get the indices of the nonzero variables.
+        """
         return self._unmasked
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
@@ -501,7 +505,11 @@ class SparseBOPDMD(BOPDMD):
 
         raise ValueError("Invalid mode_regularizer provided.")
 
+    @property
     def mask(self):
+        """
+        Get the mask used to cover zero variables.
+        """
         M = np.ones(self.snapshots.shape[0])
         M[self.operator.unmasked_indices] = 0.0
         return M.reshape(self.snapshots_shape)
