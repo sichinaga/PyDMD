@@ -120,7 +120,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return objective
 
-        def compute_B(B0, alpha):
+        def compute_B(B0, alpha, H):
             """
             Use accelerated prox gradient to update B for the current alpha.
             """
@@ -159,7 +159,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return B_updated
 
-        def compute_alpha(B, alpha_0):
+        def compute_alpha(B, alpha_0, H):
             """
             Use Levenberg-Marquardt to step alpha for the current B.
             """
@@ -252,10 +252,10 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         for itr in range(maxiter):
             # Get the new optimal matrix B.
-            B_new = compute_B(B, alpha)
+            B_new = compute_B(B, alpha, H)
 
             # Take a Levenberg-Marquardt step to update alpha.
-            alpha_new = compute_alpha(B_new, alpha)
+            alpha_new = compute_alpha(B_new, alpha, H)
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
