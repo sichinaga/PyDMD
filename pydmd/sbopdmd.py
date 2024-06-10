@@ -536,9 +536,13 @@ class SparseBOPDMD(BOPDMD):
         """
         Get the mask used to cover zero variables.
         """
-        M = np.ones(self.snapshots.shape[0])
-        M[self.operator.unmasked_indices] = 0.0
-        return M.reshape(self.snapshots_shape)
+        all_masks = []
+        for indices in self.operator.unmasked_indices:
+            M = np.ones(self.snapshots.shape[0])
+            M[indices] = 0.0
+            all_masks.append(M.reshape(self.snapshots_shape))
+
+        return all_masks
 
     def fit(self, X, t):
         """
