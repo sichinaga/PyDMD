@@ -26,6 +26,7 @@ from .sbopdmd_utils import (
     scaled_soft_threshold,
     accelerated_prox_grad,
     get_nonzero_cols,
+    split_B,
 )
 
 
@@ -178,7 +179,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             # Define M, IS, and IA.
             M, IS = H.shape
-            IA = len(init_alpha)
+            IA = len(alpha_0)
 
             djac_matrix = np.zeros((M * IS, IA), dtype="complex")
             rjac = np.zeros((2 * IA, IA), dtype="complex")
@@ -256,8 +257,9 @@ class sBOPDMDOperator(BOPDMDOperator):
             B = np.copy(self._init_B)
 
         # Initialize storage for the global alpha and B outputs.
-        alpha_global = np.empty(alpha.shape)
-        B_global = np.empty(B.shape)
+        alpha_global = np.empty(alpha.shape, dtype="complex")
+        B_global = np.empty(B.shape, dtype="complex")
+        all_global_found = False
         itr_global = 0
         k = 1
 
@@ -278,7 +280,8 @@ class sBOPDMDOperator(BOPDMDOperator):
                 B_new[:, unmasked_inds] = compute_B(
                     B[:, unmasked_inds], alpha, H[:, unmasked_inds]
                 )
-                self._unmasked.append(unmasked_inds)
+                if itr > 0 and not all_global_found:
+                    self._unmasked.append(unmasked_inds)
             else:
                 B_new = compute_B(B, alpha, H)
 
@@ -301,17 +304,27 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             # Update the global matrices.
             if self._use_mask:
-                M = B.shape[1]
-                M_active = len(self._unmasked[-1])
-                # If a sufficient number of features are active, we are dealing
-                # with a global mode. Find and remove it from alpha, B. Reserve
-                # the global information for the final output.
-                if itr % k == 0 and M_active > 0.9 * M:
-                    global_eig, global_mode, alpha, B = self._get_global_mode(B, alpha)
-                    H, H_proj = self._remove_mode(H, t, global_eig, global_mode)
-                    alpha_global[itr_global] = global_eig
-                    B_global[itr_global] = global_mode
-                    itr_global += 1
+                # If enough features are active, we have a global mode.
+                # Note: On the first iteration, noise etc. often make the mask
+                # non-existent -- begin this process after the first iteration.
+                if not all_global_found and itr > 0:
+                    M = B.shape[1]
+                    M_active = len(self._unmasked[-1])
+                    mode_found = M_active > 0.9 * M and itr % k == 0
+                    if mode_found:
+                        # Find global mode and remove it from alpha, B.
+                        global_eig, global_mode, alpha, B = self._get_global_mode(B, alpha)
+                        # Remove the global mode from the data also.
+                        H, H_proj = self._remove_mode(H, t, global_eig, global_mode)
+                        # Reserve global information for the final output.
+                        alpha_global[itr_global] = global_eig
+                        B_global[itr_global] = global_mode
+                        itr_global += 1
+                    else:
+                        alpha_global[itr_global:] = alpha
+                        B_global[itr_global:] = B
+                        all_global_found = True
+                        # del self._unmasked[-1]
                 else:
                     alpha_global[itr_global:] = alpha
                     B_global[itr_global:] = B
@@ -339,7 +352,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             if converged:
                 if verbose:
                     print("Convergence reached!")
-                return B, alpha, converged
+                return B_global, alpha_global, converged
 
             if stalled:
                 if verbose:
@@ -350,7 +363,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                         "Consider decreasing eps_stall."
                     )
                     print(msg.format(eps_stall, itr + 1, all_obj[itr]))
-                return B, alpha, converged
+                return B_global, alpha_global, converged
 
         # Failed to meet tolerance in maxiter steps.
         if verbose:
@@ -360,7 +373,36 @@ class sBOPDMDOperator(BOPDMDOperator):
             )
             print(msg.format(maxiter, all_err[itr]))
 
-        return B, alpha, converged
+        return B_global, alpha_global, converged
+
+    def _single_trial_compute_operator(self, H, t, init_alpha):
+        """
+        Helper function that computes the standard optimized dmd operator.
+        Returns the resulting DMD modes, eigenvalues, amplitudes, reduced
+        system matrix, full system matrix, and whether or not convergence
+        of the variable projection routine was reached.
+        """
+        B, alpha, converged = self._variable_projection(
+            H, t, init_alpha, self._exp_function, self._exp_function_deriv
+        )
+        # Save the modes, eigenvalues, and amplitudes respectively.
+        B, b = split_B(B)
+        w = B.T
+        e = alpha
+
+        # Compute the projected propagator Atilde.
+        w_proj = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot(
+            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
+        )
+
+        # Compute the full system matrix A.
+        if self._compute_A:
+            A = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
+        else:
+            A = None
+
+        return w, e, b, Atilde, A, converged
 
     def _get_global_mode(self, B, alpha):
         """
