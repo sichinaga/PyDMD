@@ -124,7 +124,6 @@ def accelerated_prox_grad(
     tol: float,
     max_iter: int,
     use_restarts: bool,
-    normalize_rows: bool,
 ):
     """
     Accelerated Proximal Gradient Descent for
@@ -173,9 +172,6 @@ def accelerated_prox_grad(
     while err >= tol:
         # Proximal gradient descent step.
         X_new = prox_g(Y - step_size * grad_f(Y), step_size)
-        if normalize_rows:
-            X_new = split_B(X_new)[0]
-
         t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t**2))
         Y_new = X_new + ((t - 1.0) / t_new) * (X_new - X)
 
