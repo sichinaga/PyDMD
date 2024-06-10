@@ -25,7 +25,6 @@ from .sbopdmd_utils import (
     scaled_hard_threshold,
     scaled_soft_threshold,
     accelerated_prox_grad,
-    split_B,
     get_nonzero_cols,
 )
 
@@ -89,7 +88,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         # Information for pixel masking.
         self._use_mask = use_mask
-        self._unmasked = None
+        self._unmasked = []
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
@@ -256,6 +255,12 @@ class sBOPDMDOperator(BOPDMDOperator):
         else:
             B = np.copy(self._init_B)
 
+        # Initialize storage for the global alpha and B outputs.
+        alpha_global = np.empty(alpha.shape)
+        B_global = np.empty(B.shape)
+        itr_global = 0
+        k = 1
+
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
         all_obj = np.empty(maxiter)
@@ -269,10 +274,11 @@ class sBOPDMDOperator(BOPDMDOperator):
             # Get the new optimal matrix B.
             if self._use_mask:
                 B_new = np.zeros(B.shape, dtype="complex")
-                self._unmasked = get_nonzero_cols(B)
-                B_new[:, self._unmasked] = compute_B(
-                    B[:, self._unmasked], alpha, H[:, self._unmasked]
+                unmasked_inds = get_nonzero_cols(B)
+                B_new[:, unmasked_inds] = compute_B(
+                    B[:, unmasked_inds], alpha, H[:, unmasked_inds]
                 )
+                self._unmasked.append(unmasked_inds)
             else:
                 B_new = compute_B(B, alpha, H)
 
@@ -292,6 +298,26 @@ class sBOPDMDOperator(BOPDMDOperator):
             # Update information.
             np.copyto(alpha, alpha_new)
             np.copyto(B, B_new)
+
+            # Update the global matrices.
+            if self._use_mask:
+                M = B.shape[1]
+                M_active = len(self._unmasked[-1])
+                # If a sufficient number of features are active, we are dealing
+                # with a global mode. Find and remove it from alpha, B. Reserve
+                # the global information for the final output.
+                if itr % k == 0 and M_active > 0.9 * M:
+                    global_eig, global_mode, alpha, B = self._get_global_mode(B, alpha)
+                    H, H_proj = self._remove_mode(H, t, global_eig, global_mode)
+                    alpha_global[itr_global] = global_eig
+                    B_global[itr_global] = global_mode
+                    itr_global += 1
+                else:
+                    alpha_global[itr_global:] = alpha
+                    B_global[itr_global:] = B
+            else:
+                alpha_global = alpha
+                B_global = B
 
             # Print iterative progress if the verbose flag is turned on.
             if verbose:
@@ -335,6 +361,36 @@ class sBOPDMDOperator(BOPDMDOperator):
             print(msg.format(maxiter, all_err[itr]))
 
         return B, alpha, converged
+
+    def _get_global_mode(self, B, alpha):
+        """
+        Finds and returns
+        """
+        # We consider the global mode to be the first row of B that contains
+        # the largest number of nonzero features, assuming B is thresholded.
+        ind_global = np.argmax(np.count_nonzero(B, axis=1))
+        global_eig = alpha[ind_global]
+        global_mode = B[ind_global]
+
+        # Remove the global component from B and alpha.
+        all_ind = np.arange(len(alpha))
+        alpha = alpha[all_ind != ind_global]
+        B = B[all_ind != ind_global]
+
+        return global_eig, global_mode, alpha, B
+
+    def _remove_mode(self, H, t, global_eig, global_mode):
+        """
+        Removes 
+        """
+        global_spatiotemporal = np.outer(np.exp(global_eig * t), global_mode)
+        H = H - global_spatiotemporal
+        if self._use_proj:
+            H_proj = H.dot(self._proj_basis.conj())
+        else:
+            H_proj = None
+
+        return H, H_proj
 
 
 class SparseBOPDMD(BOPDMD):
