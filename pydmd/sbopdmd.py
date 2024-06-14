@@ -288,6 +288,8 @@ class sBOPDMDOperator(BOPDMDOperator):
             if self._use_mask:
                 if self._unmasked_features:
                     valid_feature_inds = self._unmasked_features
+                    mask = np.setdiff1d(np.arange(N), self._unmasked_features)
+                    B[:, mask] = 0.0
                 else:
                     valid_feature_inds = get_nonzero_cols(B)
                     self._unmasked_features_computed = valid_feature_inds
