@@ -44,6 +44,8 @@ class sBOPDMDOperator(BOPDMDOperator):
         init_alpha,
         init_B,
         proj_basis,
+        unmasked_features,
+        sampling_ratio,
         num_trials,
         trial_size,
         eig_sort,
@@ -62,6 +64,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         prox_grad_tol=1e-6,
         prox_grad_maxiter=1000,
         prox_grad_restart=True,
+        sampling_rng=None,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -89,7 +92,15 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         # Information for pixel masking.
         self._use_mask = use_mask
-        self._unmasked = []
+        self._unmasked_features = unmasked_features
+        self._unmasked_features_computed = None
+
+        # Parameters for random feature sampling.
+        self._sampling_ratio = sampling_ratio
+        if sampling_rng is None:
+            self._sampling_rng = np.random.default_rng()
+        else:
+            self._sampling_rng = sampling_rng
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
@@ -98,11 +109,14 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["use_restarts"] = prox_grad_restart
 
     @property
-    def unmasked_indices(self):
+    def unmasked_features(self):
         """
         Get the indices of the nonzero variables.
         """
-        return self._unmasked
+        if self._unmasked_features:
+            return self._unmasked_features
+
+        return self._unmasked_features_computed
 
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
@@ -130,6 +144,9 @@ class sBOPDMDOperator(BOPDMDOperator):
             residual = H - Phi(alpha, t).dot(B)
             objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
             objective += self._mode_regularizer(B)
+
+            # Scale by the number of features.
+            objective /= H.shape[1]
 
             return objective
 
@@ -161,11 +178,11 @@ class sBOPDMDOperator(BOPDMDOperator):
                 plt.figure(figsize=(8, 2))
                 plt.subplot(1, 2, 1)
                 plt.title("Objective")
-                plt.plot(obj_hist, "-o")
+                plt.plot(obj_hist, ".-", c="k", mec="b", mfc="b")
                 plt.semilogy()
                 plt.subplot(1, 2, 2)
                 plt.title("Error")
-                plt.plot(err_hist, "-o")
+                plt.plot(err_hist, ".-", c="k", mec="r", mfc="r")
                 plt.semilogy()
                 plt.tight_layout()
                 plt.show()
@@ -238,12 +255,13 @@ class sBOPDMDOperator(BOPDMDOperator):
             if verbose:
                 print(
                     "Failed to find appropriate step length. "
-                    "Consider increasing maxlam or changing lamup."
+                    "Consider increasing maxlam or changing lamup.\n"
                 )
 
             return alpha_0
 
-        # Set the projected data if requested.
+        # Record the original data set. Set the projected data if requested.
+        N = H.shape[1]
         if self._use_proj:
             H_proj = H.dot(self._proj_basis.conj())
 
@@ -255,13 +273,6 @@ class sBOPDMDOperator(BOPDMDOperator):
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
         else:
             B = np.copy(self._init_B)
-
-        # Initialize storage for the global alpha and B outputs.
-        alpha_global = np.empty(alpha.shape, dtype="complex")
-        B_global = np.empty(B.shape, dtype="complex")
-        all_global_found = False
-        itr_global = 0
-        k = 1
 
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
@@ -275,15 +286,23 @@ class sBOPDMDOperator(BOPDMDOperator):
         for itr in range(maxiter):
             # Get the new optimal matrix B.
             if self._use_mask:
-                B_new = np.zeros(B.shape, dtype="complex")
-                unmasked_inds = get_nonzero_cols(B)
-                B_new[:, unmasked_inds] = compute_B(
-                    B[:, unmasked_inds], alpha, H[:, unmasked_inds]
-                )
-                if itr > 0 and not all_global_found:
-                    self._unmasked.append(unmasked_inds)
+                if self._unmasked_features:
+                    valid_feature_inds = self._unmasked_features
+                else:
+                    valid_feature_inds = get_nonzero_cols(B)
+                    self._unmasked_features_computed = valid_feature_inds
             else:
-                B_new = compute_B(B, alpha, H)
+                valid_feature_inds = np.arange(N)
+
+            B_new = np.copy(B)
+            sampled_inds = self._sampling_rng.choice(
+                valid_feature_inds,
+                size=int(self._sampling_ratio * len(valid_feature_inds)),
+                replace=False,
+            )
+            B_new[:, sampled_inds] = compute_B(
+                B[:, sampled_inds], alpha, H[:, sampled_inds]
+            )
 
             # Take a Levenberg-Marquardt step to update alpha.
             if self._use_proj:
@@ -302,49 +321,19 @@ class sBOPDMDOperator(BOPDMDOperator):
             np.copyto(alpha, alpha_new)
             np.copyto(B, B_new)
 
-            # Update the global matrices.
-            if self._use_mask:
-                # If enough features are active, we have a global mode.
-                # Note: On the first iteration, noise etc. often make the mask
-                # non-existent -- begin this process after the first iteration.
-                if not all_global_found and itr > 0:
-                    M = B.shape[1]
-                    M_active = len(self._unmasked[-1])
-                    mode_found = M_active > 0.9 * M and itr % k == 0
-                    if mode_found:
-                        # Find global mode and remove it from alpha, B.
-                        global_eig, global_mode, alpha, B = self._get_global_mode(B, alpha)
-                        # Remove the global mode from the data also.
-                        H, H_proj = self._remove_mode(H, t, global_eig, global_mode)
-                        # Reserve global information for the final output.
-                        alpha_global[itr_global] = global_eig
-                        B_global[itr_global] = global_mode
-                        itr_global += 1
-                    else:
-                        alpha_global[itr_global:] = alpha
-                        B_global[itr_global:] = B
-                        all_global_found = True
-                        # del self._unmasked[-1]
-                else:
-                    alpha_global[itr_global:] = alpha
-                    B_global[itr_global:] = B
-            else:
-                alpha_global = alpha
-                B_global = B
-
             # Print iterative progress if the verbose flag is turned on.
             if verbose:
                 print(
                     f"Iteration {itr + 1}: "
-                    f"Objective = {np.round(all_obj[itr], decimals=3)} "
-                    f"Error (alpha) = {np.round(err_alpha, decimals=3)} "
-                    f"Error (B) = {np.round(err_B, decimals=3)}.\n"
+                    f"Objective = {np.round(all_obj[itr], decimals=4)} "
+                    f"Error (alpha) = {np.round(err_alpha, decimals=4)} "
+                    f"Error (B) = {np.round(err_B, decimals=4)}.\n"
                 )
 
             # Update termination status and terminate if converged or stalled.
             converged = all_err[itr] < tol
             # Note: we may need to change to abs if this stall condition causes
-            # too many early terminations due to worsenig objectives.
+            # too many early terminations due to worsening objectives.
             stalled = (itr > 0) and (
                 all_obj[itr - 1] - all_obj[itr] < eps_stall * all_obj[itr - 1]
             )
@@ -352,7 +341,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             if converged:
                 if verbose:
                     print("Convergence reached!")
-                return B_global, alpha_global, converged
+                return B, alpha, converged
 
             if stalled:
                 if verbose:
@@ -363,7 +352,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                         "Consider decreasing eps_stall."
                     )
                     print(msg.format(eps_stall, itr + 1, all_obj[itr]))
-                return B_global, alpha_global, converged
+                return B, alpha, converged
 
         # Failed to meet tolerance in maxiter steps.
         if verbose:
@@ -373,7 +362,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             )
             print(msg.format(maxiter, all_err[itr]))
 
-        return B_global, alpha_global, converged
+        return B, alpha, converged
 
     def _single_trial_compute_operator(self, H, t, init_alpha):
         """
@@ -404,36 +393,6 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         return w, e, b, Atilde, A, converged
 
-    def _get_global_mode(self, B, alpha):
-        """
-        Finds and returns
-        """
-        # We consider the global mode to be the first row of B that contains
-        # the largest number of nonzero features, assuming B is thresholded.
-        ind_global = np.argmax(np.count_nonzero(B, axis=1))
-        global_eig = alpha[ind_global]
-        global_mode = B[ind_global]
-
-        # Remove the global component from B and alpha.
-        all_ind = np.arange(len(alpha))
-        alpha = alpha[all_ind != ind_global]
-        B = B[all_ind != ind_global]
-
-        return global_eig, global_mode, alpha, B
-
-    def _remove_mode(self, H, t, global_eig, global_mode):
-        """
-        Removes 
-        """
-        global_spatiotemporal = np.outer(np.exp(global_eig * t), global_mode)
-        H = H - global_spatiotemporal
-        if self._use_proj:
-            H_proj = H.dot(self._proj_basis.conj())
-        else:
-            H_proj = None
-
-        return H, H_proj
-
 
 class SparseBOPDMD(BOPDMD):
     """
@@ -457,6 +416,14 @@ class SparseBOPDMD(BOPDMD):
         - "lambda_2" - Scaling for the L2 norm squared (used by "l02", "l12").
             Defaults to 1e-6.
     :type regularizer_params: dict
+    :param use_mask:
+    :type use_mask: bool
+    :param init_B:
+    :type init_B: np.ndarray
+    :param unmasked_features:
+    :type unmasked_features:
+    :param sampling_ratio:
+    :type sampling_ratio: float
     :param mode_prox: Proximal operator of the given mode_regularizer function
         given matrix input X and a constant float.
     :type mode_prox: function
@@ -473,6 +440,8 @@ class SparseBOPDMD(BOPDMD):
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
+        unmasked_features: np.ndarray = None,
+        sampling_ratio: float = 0.2,
         num_trials: int = 0,
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
@@ -503,6 +472,8 @@ class SparseBOPDMD(BOPDMD):
         self._regularizer_params = regularizer_params
         self._use_mask = use_mask
         self._init_B = init_B
+        self._unmasked_features = unmasked_features
+        self._sampling_ratio = sampling_ratio
 
         if self._regularizer_params is None:
             self._regularizer_params = {}
@@ -576,15 +547,13 @@ class SparseBOPDMD(BOPDMD):
     @property
     def mask(self):
         """
-        Get the mask used to cover zero variables.
+        Get the mask used to cover features.
         """
-        all_masks = []
-        for indices in self.operator.unmasked_indices:
-            M = np.ones(self.snapshots.shape[0])
-            M[indices] = 0.0
-            all_masks.append(M.reshape(self.snapshots_shape))
+        M = np.ones(self.snapshots.shape[0])
+        M[self.operator.unmasked_features] = 0.0
+        M = M.reshape(self.snapshots_shape)
 
-        return all_masks
+        return M
 
     def fit(self, X, t):
         """
@@ -649,6 +618,8 @@ class SparseBOPDMD(BOPDMD):
             self._init_alpha,
             self._init_B,
             self._proj_basis,
+            self._unmasked_features,
+            self._sampling_ratio,
             self._num_trials,
             self._trial_size,
             self._eig_sort,
