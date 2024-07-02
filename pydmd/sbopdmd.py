@@ -27,6 +27,7 @@ from .sbopdmd_utils import (
     accelerated_prox_grad,
     get_nonzero_cols,
     split_B,
+    backtracking_line_search,
 )
 
 
@@ -41,6 +42,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         compute_A,
         use_proj,
         use_mask,
+        use_svrg,
         init_alpha,
         init_B,
         proj_basis,
@@ -61,10 +63,13 @@ class sBOPDMDOperator(BOPDMDOperator):
         tol=1e-6,
         eps_stall=1e-12,
         verbose=False,
+        sampling_rng=None,
         prox_grad_tol=1e-6,
         prox_grad_maxiter=1000,
         prox_grad_restart=True,
-        sampling_rng=None,
+        line_search_t0=1.0,
+        line_search_t_up=0.5,
+        line_search_grad_scale=1e-3,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -95,12 +100,24 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._unmasked_features = unmasked_features
         self._unmasked_features_computed = None
 
-        # Parameters for random feature sampling.
+        # Parameters for random feature sampling and SVRG.
+        self._use_svrg = use_svrg
         self._sampling_ratio = sampling_ratio
         if sampling_rng is None:
             self._sampling_rng = np.random.default_rng()
         else:
             self._sampling_rng = sampling_rng
+
+        self._maxiter = maxiter
+        self._tol = tol
+        self._eps_stall = eps_stall
+        self._verbose = verbose
+
+        # Set the parameters of Levenberg-Marquardt.
+        self._lev_marq_params = {}
+        self._lev_marq_params["init_lambda"] = init_lambda
+        self._lev_marq_params["maxlam"] = maxlam
+        self._lev_marq_params["lamup"] = lamup
 
         # Set the parameters of accelerated prox gradient descent.
         self._prox_grad_params = {}
@@ -108,36 +125,69 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
         self._prox_grad_params["use_restarts"] = prox_grad_restart
 
+        # Set the parameters of backtracking line search.
+        self._line_search_params = {}
+        self._line_search_params["t0"] = line_search_t0
+        self._line_search_params["t_up"] = line_search_t_up
+        self._line_search_params["grad_scale"] = line_search_grad_scale
+
     @property
     def unmasked_features(self):
         """
         Get the indices of the nonzero variables.
         """
-        if self._unmasked_features:
+        if self._unmasked_features is not None:
             return self._unmasked_features
 
         return self._unmasked_features_computed
 
-    def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
+    def _compute_B(self, B0, alpha, H, t, Phi):
         """
-        Variable projection routine for multivariate data with regularization.
-        Note: The B matrix always contains the amplitude-scaled modes.
+        Use accelerated prox gradient to update B for the current alpha.
+        """
+        A = Phi(alpha, t)
+        beta_f = np.linalg.norm(A, 2) ** 2
+
+        def func_f(Z):
+            return 0.5 * np.linalg.norm(H - A.dot(Z), "fro") ** 2
+
+        def grad_f(Z):
+            return A.conj().T.dot(A.dot(Z) - H)
+
+        B_updated, obj_hist, err_hist = accelerated_prox_grad(
+            B0,
+            func_f,
+            self._mode_regularizer,
+            grad_f,
+            self._mode_prox,
+            beta_f,
+            **self._prox_grad_params,
+        )
+
+        if self._verbose:
+            print("Prox Gradient Results:")
+            plt.figure(figsize=(8, 2))
+            plt.subplot(1, 2, 1)
+            plt.title("Objective")
+            plt.plot(obj_hist, ".-", c="k", mec="b", mfc="b")
+            plt.semilogy()
+            plt.subplot(1, 2, 2)
+            plt.title("Error")
+            plt.plot(err_hist, ".-", c="k", mec="r", mfc="r")
+            plt.semilogy()
+            plt.tight_layout()
+            plt.show()
+
+        return B_updated
+
+    def _compute_alpha_levmarq(
+        self, B, alpha_0, H, t, Phi, dPhi, init_lambda, maxlam, lamup
+    ):
+        """
+        Use Levenberg-Marquardt to step alpha for the current B.
         """
 
-        # Unpack all variable projection parameters stored in varpro_opts.
-        (
-            init_lambda,
-            maxlam,
-            lamup,
-            _,
-            maxiter,
-            tol,
-            eps_stall,
-            _,
-            verbose,
-        ) = self._varpro_opts
-
-        def compute_objective(B, alpha, H):
+        def objective_func(B, alpha, H):
             """
             Compute the current objective.
             """
@@ -150,118 +200,146 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             return objective
 
-        def compute_B(B0, alpha, H):
+        # Define M, IS, and IA.
+        M, IS = H.shape
+        IA = len(alpha_0)
+
+        djac_matrix = np.zeros((M * IS, IA), dtype="complex")
+        rjac = np.zeros((2 * IA, IA), dtype="complex")
+        scales = np.zeros(IA)
+        objective = objective_func(B, alpha_0, H)
+        residual = H - Phi(alpha_0, t).dot(B)
+
+        for i in range(IA):
+            # Build the Jacobian matrix by looping over all alpha indices.
+            djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
+            # Scale for the Levenberg-Marquardt algorithm.
+            scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
+            scales[i] = max(scales[i], 1e-6)
+
+        # Loop to determine lambda (the step-size parameter).
+        rhs_temp = residual.ravel(order="F")[:, None]
+        q_out, djac_out, j_pvt = qr(djac_matrix, mode="economic", pivoting=True)
+        ij_pvt = np.arange(IA)
+        ij_pvt = ij_pvt[j_pvt]
+        rjac[:IA] = np.triu(djac_out[:IA])
+        rhs_top = q_out.conj().T.dot(rhs_temp)
+        scales_pvt = scales[j_pvt[:IA]]
+        rhs = np.concatenate(
+            (rhs_top[:IA], np.zeros(IA, dtype="complex")), axis=None
+        )
+
+        def step(_lambda, scales_pvt=scales_pvt, rhs=rhs, ij_pvt=ij_pvt):
             """
-            Use accelerated prox gradient to update B for the current alpha.
+            Helper function that, when given a step size _lambda,
+            computes and returns the updated step and alpha vectors.
             """
-            A = Phi(alpha, t)
-            beta_f = np.linalg.norm(A, 2) ** 2
+            # Compute the step delta.
+            rjac[IA:] = _lambda * np.diag(scales_pvt)
+            delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
+            delta = delta[ij_pvt]
+            # Compute the updated alpha vector.
+            alpha_updated = alpha_0.ravel() + delta.ravel()
+            alpha_updated = self._push_eigenvalues(alpha_updated)
+            return alpha_updated
 
-            def func_f(Z):
-                return 0.5 * np.linalg.norm(H - A.dot(Z), "fro") ** 2
+        for j in range(maxlam + 1):
+            # Scale lambda up every iteration.
+            lam = init_lambda * (lamup**j)
 
-            def grad_f(Z):
-                return A.conj().T.dot(A.dot(Z) - H)
+            # Take a step using our step size lam.
+            alpha_new = step(lam)
+            objective_new = objective_func(B, alpha_new, H)
 
-            B_updated, obj_hist, err_hist = accelerated_prox_grad(
-                B0,
-                func_f,
-                self._mode_regularizer,
-                grad_f,
-                self._mode_prox,
-                beta_f,
-                **self._prox_grad_params,
+            # If the objective improved, terminate.
+            if objective_new < objective:
+                return alpha_new
+
+        # Terminate if no appropriate step length was found...
+        if self._verbose:
+            print(
+                "Failed to find appropriate LM step length. "
+                "Consider increasing maxlam or changing lamup.\n"
             )
 
-            if verbose:
-                print("Prox Gradient Results:")
-                plt.figure(figsize=(8, 2))
-                plt.subplot(1, 2, 1)
-                plt.title("Objective")
-                plt.plot(obj_hist, ".-", c="k", mec="b", mfc="b")
-                plt.semilogy()
-                plt.subplot(1, 2, 2)
-                plt.title("Error")
-                plt.plot(err_hist, ".-", c="k", mec="r", mfc="r")
-                plt.semilogy()
-                plt.tight_layout()
-                plt.show()
+        return alpha_0
 
-            return B_updated
+    def _compute_alpha_svrg(
+        self, B, alpha_0, H, t, Phi, sampled_inds, alpha_grad_all
+    ):
+        """
+        Use SVRG to step alpha for the current B.
+        """
+        N_s = len(sampled_inds)
+        H_s = H[:, sampled_inds]
+        B_s = B[:, sampled_inds]
 
-        def compute_alpha(B, alpha_0, H):
-            """
-            Use Levenberg-Marquardt to step alpha for the current B.
-            """
+        # Objective function wrt alpha.
+        def func_f(z):
+            z = self._push_eigenvalues(z)
+            obj = np.linalg.norm(H_s - Phi(z, t).dot(B_s), "fro") ** 2
+            obj *= 0.5 * (1 / N_s)
+            return obj
 
-            # Define M, IS, and IA.
-            M, IS = H.shape
-            IA = len(alpha_0)
-
-            djac_matrix = np.zeros((M * IS, IA), dtype="complex")
-            rjac = np.zeros((2 * IA, IA), dtype="complex")
-            scales = np.zeros(IA)
-            objective = compute_objective(B, alpha_0, H)
-            residual = H - Phi(alpha_0, t).dot(B)
-
-            for i in range(IA):
-                # Build the Jacobian matrix by looping over all alpha indices.
-                djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
-                # Scale for the Levenberg-Marquardt algorithm.
-                scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
-                scales[i] = max(scales[i], 1e-6)
-
-            # Loop to determine lambda (the step-size parameter).
-            rhs_temp = residual.ravel(order="F")[:, None]
-            q_out, djac_out, j_pvt = qr(
-                djac_matrix, mode="economic", pivoting=True
-            )
-            ij_pvt = np.arange(IA)
-            ij_pvt = ij_pvt[j_pvt]
-            rjac[:IA] = np.triu(djac_out[:IA])
-            rhs_top = q_out.conj().T.dot(rhs_temp)
-            scales_pvt = scales[j_pvt[:IA]]
-            rhs = np.concatenate(
-                (rhs_top[:IA], np.zeros(IA, dtype="complex")), axis=None
-            )
-
-            def step(_lambda, scales_pvt=scales_pvt, rhs=rhs, ij_pvt=ij_pvt):
-                """
-                Helper function that, when given a step size _lambda,
-                computes and returns the updated step and alpha vectors.
-                """
-                # Compute the step delta.
-                rjac[IA:] = _lambda * np.diag(scales_pvt)
-                delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
-                delta = delta[ij_pvt]
-                # Compute the updated alpha vector.
-                alpha_updated = alpha_0.ravel() + delta.ravel()
-                alpha_updated = self._push_eigenvalues(alpha_updated)
-                return alpha_updated
-
-            for j in range(maxlam + 1):
-                # Scale lambda up every iteration.
-                lam = init_lambda * (lamup**j)
-
-                # Take a step using our step size lam.
-                alpha_new = step(lam)
-                objective_new = compute_objective(B, alpha_new, H)
-
-                # If the objective improved, terminate.
-                if objective_new < objective:
-                    return alpha_new
-
-            # Terminate if no appropriate step length was found...
-            if verbose:
-                print(
-                    "Failed to find appropriate step length. "
-                    "Consider increasing maxlam or changing lamup.\n"
+        # Objective function gradient wrt alpha.
+        def grad_f(z):
+            grad = -np.diag(
+                np.linalg.multi_dot(
+                    [
+                        B_s,
+                        (H_s - Phi(z, t).dot(B_s)).T,
+                        np.diag(t),
+                        Phi(z, t),
+                    ]
                 )
+            )
+            grad *= 1 / N_s
+            return grad
 
-            return alpha_0
+        # (1) Update the gradient for each of the updated features.
+        R_s = H_s - Phi(alpha_0, t).dot(B_s)
+        alpha_grad_new = -np.multiply(
+            B_s,
+            np.linalg.multi_dot([Phi(alpha_0, t).T, np.diag(t), R_s]),
+        )
+        alpha_grad_updates = alpha_grad_new - alpha_grad_all[:, sampled_inds]
+        alpha_grad_avg_update = np.average(alpha_grad_updates, axis=1)
+        alpha_grad_avg = np.average(alpha_grad_all, axis=1)
 
-        # Record the original data set. Set the projected data if requested.
+        # (2) Get the new descent direction d and the new step size t.
+        svrg_d = alpha_grad_avg + alpha_grad_avg_update
+        svrg_t = backtracking_line_search(
+            alpha_0, svrg_d, func_f, grad_f, **self._line_search_params
+        )
+        alpha_new = self._push_eigenvalues(alpha_0 - svrg_t * svrg_d)
+
+        # (3) Update and return the alpha gradients.
+        alpha_grad_all[:, sampled_inds] = alpha_grad_new
+
+        return alpha_new, alpha_grad_all
+
+    def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
+        """
+        Variable projection routine for multivariate data with regularization.
+        """
+
+        def objective_func(B, alpha):
+            """
+            Compute the current objective.
+            """
+            residual = H - Phi(alpha, t).dot(B)
+            objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
+            objective += self._mode_regularizer(B)
+
+            # Scale by the number of features.
+            objective /= N
+
+            return objective
+
+        # Record the original data set size (number of features).
         N = H.shape[1]
+
+        # Set the projected data if requested.
         if self._use_proj:
             H_proj = H.dot(self._proj_basis.conj())
 
@@ -274,19 +352,30 @@ class sBOPDMDOperator(BOPDMDOperator):
         else:
             B = np.copy(self._init_B)
 
+        # Set the objective gradient for each feature.
+        if self._use_svrg:
+            # (r, N) matrix of gradients -- the average across all
+            # N features should approximate the gradient wrt alpha.
+            alpha_grad_all = -np.multiply(
+                B,
+                np.linalg.multi_dot(
+                    [Phi(alpha, t).T, np.diag(t), H - Phi(alpha, t).dot(B)]
+                ),
+            )
+
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
-        all_obj = np.empty(maxiter)
-        all_err = np.empty(maxiter)
+        all_obj = np.empty(self._maxiter)
+        all_err = np.empty(self._maxiter)
 
         # Initialize termination flags.
         converged = False
         stalled = False
 
-        for itr in range(maxiter):
-            # Get the new optimal matrix B.
+        for itr in range(self._maxiter):
+            # Obtain a sample of the feature indices for speed-up.
             if self._use_mask:
-                if self._unmasked_features:
+                if self._unmasked_features is not None:
                     valid_feature_inds = self._unmasked_features
                     mask = np.setdiff1d(np.arange(N), self._unmasked_features)
                     B[:, mask] = 0.0
@@ -296,27 +385,45 @@ class sBOPDMDOperator(BOPDMDOperator):
             else:
                 valid_feature_inds = np.arange(N)
 
-            B_new = np.copy(B)
             sampled_inds = self._sampling_rng.choice(
                 valid_feature_inds,
                 size=int(self._sampling_ratio * len(valid_feature_inds)),
                 replace=False,
             )
-            B_new[:, sampled_inds] = compute_B(
-                B[:, sampled_inds], alpha, H[:, sampled_inds]
+
+            # Get the new optimal matrix B.
+            B_new = np.copy(B)
+            B_new[:, sampled_inds] = self._compute_B(
+                B[:, sampled_inds], alpha, H[:, sampled_inds], t, Phi
             )
 
-            # Take a Levenberg-Marquardt step to update alpha.
-            if self._use_proj:
-                B_new_proj = B_new.dot(self._proj_basis.conj())
-                alpha_new = compute_alpha(B_new_proj, alpha, H_proj)
+            if self._use_svrg:
+                # Take an SVRG step to update alpha.
+                alpha_new, alpha_grad_all = self._compute_alpha_svrg(
+                    B_new, alpha, H, t, Phi, sampled_inds, alpha_grad_all
+                )
             else:
-                alpha_new = compute_alpha(B_new, alpha, H)
+                # Take a Levenberg-Marquardt step to update alpha.
+                if self._use_proj:
+                    B_new_proj = B_new.dot(self._proj_basis.conj())
+                    alpha_new = self._compute_alpha_levmarq(
+                        B_new_proj,
+                        alpha,
+                        H_proj,
+                        t,
+                        Phi,
+                        dPhi,
+                        **self._lev_marq_params,
+                    )
+                else:
+                    alpha_new = self._compute_alpha_levmarq(
+                        B_new, alpha, H, t, Phi, dPhi, **self._lev_marq_params
+                    )
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
             err_B = np.linalg.norm(B - B_new)
-            all_obj[itr] = compute_objective(B_new, alpha_new, H)
+            all_obj[itr] = objective_func(B_new, alpha_new)
             all_err[itr] = err_alpha + err_B
 
             # Update information.
@@ -324,7 +431,7 @@ class sBOPDMDOperator(BOPDMDOperator):
             np.copyto(B, B_new)
 
             # Print iterative progress if the verbose flag is turned on.
-            if verbose:
+            if self._verbose:
                 print(
                     f"Iteration {itr + 1}: "
                     f"Objective = {np.round(all_obj[itr], decimals=4)} "
@@ -333,36 +440,37 @@ class sBOPDMDOperator(BOPDMDOperator):
                 )
 
             # Update termination status and terminate if converged or stalled.
-            converged = all_err[itr] < tol
+            converged = all_err[itr] < self._tol
             # Note: we may need to change to abs if this stall condition causes
             # too many early terminations due to worsening objectives.
             stalled = (itr > 0) and (
-                all_obj[itr - 1] - all_obj[itr] < eps_stall * all_obj[itr - 1]
+                all_obj[itr - 1] - all_obj[itr]
+                < self._eps_stall * all_obj[itr - 1]
             )
 
             if converged:
-                if verbose:
+                if self._verbose:
                     print("Convergence reached!")
                 return B, alpha, converged
 
             if stalled:
-                if verbose:
+                if self._verbose:
                     msg = (
                         "Stall detected: objective reduced by less than {} "
                         "times the objective at the previous step. "
                         "Iteration {}. Current objective {}. "
                         "Consider decreasing eps_stall."
                     )
-                    print(msg.format(eps_stall, itr + 1, all_obj[itr]))
+                    print(msg.format(self._eps_stall, itr + 1, all_obj[itr]))
                 return B, alpha, converged
 
         # Failed to meet tolerance in maxiter steps.
-        if verbose:
+        if self._verbose:
             msg = (
                 "Failed to reach tolerance after maxiter = {} iterations. "
                 "Current error {}."
             )
-            print(msg.format(maxiter, all_err[itr]))
+            print(msg.format(self._maxiter, all_err[itr]))
 
         return B, alpha, converged
 
@@ -439,6 +547,7 @@ class SparseBOPDMD(BOPDMD):
         compute_A: bool = False,
         use_proj: bool = True,
         use_mask: bool = True,
+        use_svrg: bool = False,
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
@@ -473,6 +582,7 @@ class SparseBOPDMD(BOPDMD):
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
         self._use_mask = use_mask
+        self._use_svrg = use_svrg
         self._init_B = init_B
         self._unmasked_features = unmasked_features
         self._sampling_ratio = sampling_ratio
@@ -568,6 +678,7 @@ class SparseBOPDMD(BOPDMD):
         """
         # Process the input data and convert to numpy.ndarrays.
         self._reset()
+        X = X.astype(complex)
         self._snapshots_holder = Snapshots(X)
         self._time = np.array(t).squeeze()
 
@@ -617,6 +728,7 @@ class SparseBOPDMD(BOPDMD):
             self._compute_A,
             self._use_proj,
             self._use_mask,
+            self._use_svrg,
             self._init_alpha,
             self._init_B,
             self._proj_basis,
