@@ -69,7 +69,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         prox_grad_restart=True,
         line_search_t0=1.0,
         line_search_t_up=0.5,
-        line_search_grad_scale=1e-3,
+        line_search_grad_scale=0.1,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -278,7 +278,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         def func_f(z):
             z = self._push_eigenvalues(z)
             obj = np.linalg.norm(H_s - Phi(z, t).dot(B_s), "fro") ** 2
-            obj *= 0.5 * (1 / N_s)
+            obj *= 0.5 # * (1 / N_s)
             return obj
 
         # Objective function gradient wrt alpha.
@@ -293,7 +293,7 @@ class sBOPDMDOperator(BOPDMDOperator):
                     ]
                 )
             )
-            grad *= 1 / N_s
+            # grad *= 1 / N_s
             return grad
 
         # (1) Update the gradient for each of the updated features.
@@ -307,11 +307,13 @@ class sBOPDMDOperator(BOPDMDOperator):
         alpha_grad_avg = np.average(alpha_grad_all, axis=1)
 
         # (2) Get the new descent direction d and the new step size t.
-        svrg_d = alpha_grad_avg + alpha_grad_avg_update
+        svrg_d = -(alpha_grad_avg + alpha_grad_avg_update)
         svrg_t = backtracking_line_search(
             alpha_0, svrg_d, func_f, grad_f, **self._line_search_params
         )
-        alpha_new = self._push_eigenvalues(alpha_0 - svrg_t * svrg_d)
+        alpha_new = self._push_eigenvalues(alpha_0 + svrg_t * svrg_d)
+        if self._verbose:
+            print(f"Line search step size found: {svrg_t}\n")
 
         # (3) Update and return the alpha gradients.
         alpha_grad_all[:, sampled_inds] = alpha_grad_new

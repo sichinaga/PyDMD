@@ -128,11 +128,11 @@ def backtracking_line_search(
     """
     t = t0
     f0 = func_f(x0)
-    f_new = func_f(x0 - dx)
+    f_new = func_f(x0 + t * dx)
     df0 = grad_scale * np.vdot(dx, grad_f(x0))
-    while f_new > f0 - t * df0:
+    while f_new > f0 + t * df0:
         t *= t_up
-        f_new = func_f(x0 - t * dx)
+        f_new = func_f(x0 + t * dx)
     return t
 
 
