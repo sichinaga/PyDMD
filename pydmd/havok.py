@@ -12,14 +12,16 @@ frenet-serret frame, Proceedings of the Royal Society A, 477
 """
 
 import warnings
+from numbers import Number
+
 import numpy as np
 import matplotlib.pyplot as plt
-
 from matplotlib.gridspec import GridSpec
 from scipy.signal import lsim, StateSpace
 from scipy.stats import norm
 
 from .bopdmd import BOPDMD
+from .dmdbase import DMDBase
 from .utils import compute_svd, differentiate
 
 
@@ -45,6 +47,10 @@ class HAVOK:
     :type lag: int
     :param num_chaos: the number of forcing terms to use in the HAVOK model.
     :type num_chaos: int
+    :param centered: whether or not to subtract the central row of the hankel
+        matrix from every row of the hankel matrix prior to applying HAVOK.
+        Note that `delays` must be an odd integer in order to apply centering.
+    :type centered: bool
     :param structured: whether to perform standard HAVOK or structured HAVOK
         (sHAVOK). If `True`, sHAVOK is performed, otherwise HAVOK is performed.
         Note that sHAVOK cannot be performed with a `BOPDMD` model.
@@ -60,18 +66,20 @@ class HAVOK:
 
     def __init__(
         self,
-        svd_rank=0,
-        delays=10,
-        lag=1,
-        num_chaos=1,
-        structured=False,
-        lstsq=True,
-        dmd=None,
+        svd_rank: Number = 0,
+        delays: int = 10,
+        lag: int = 1,
+        num_chaos: int = 1,
+        centered: bool = False,
+        structured: bool = False,
+        lstsq: bool = True,
+        dmd: DMDBase = None,
     ):
         self._svd_rank = svd_rank
         self._delays = delays
         self._lag = lag
         self._num_chaos = num_chaos
+        self._centered = centered
         self._structured = structured
         self._lstsq = lstsq
         self._dmd = dmd
@@ -80,11 +88,13 @@ class HAVOK:
         self._snapshots = None
         self._ho_snapshots = None
         self._time = None
+        self._center_snapshot = None
 
         # Keep track of SVD information.
         self._singular_vecs = None
         self._singular_vals = None
         self._delay_embeddings = None
+        self._active_slices = None
 
         # Keep track of the full HAVOK operator.
         self._havok_operator = None
@@ -146,6 +156,22 @@ class HAVOK:
         if self._time is None:
             raise ValueError("You need to call fit().")
         return self._time
+
+    @property
+    def center_snapshot(self):
+        """
+        Get the central row of the Hankel matrix.
+
+        :return: the vector that contains the central row of the Hankel matrix.
+        :rtype: numpy.ndarray
+        """
+        if self._center_snapshot is None:
+            if self._centered:
+                raise ValueError("You need to call fit().")
+            raise ValueError(
+                "Data centering not used. Access data using ho_snapshots."
+            )
+        return self._center_snapshot
 
     @property
     def modes(self):
@@ -213,6 +239,20 @@ class HAVOK:
         return self._delay_embeddings[:, -self._num_chaos :]
 
     @property
+    def active_slices(self):
+        """
+        Get the time index slices at which the forcing terms are active.
+        Slices are returned in a list of (num_slice, 2) numpy arrays,
+        where each array accounts for a single forcing term.
+
+        :return: list containing the active index slices.
+        :rtype: list
+        """
+        if self._active_slices is None:
+            raise ValueError("You need to call compute_active_index_slices().")
+        return self._active_slices
+
+    @property
     def operator(self):
         """
         Get the full HAVOK regression model,
@@ -276,7 +316,7 @@ class HAVOK:
             raise ValueError("You need to call fit().")
         return self._r
 
-    def hankel(self, X):
+    def hankel(self, X: np.ndarray):
         """
         Given a data matrix X as a 1-D or 2-D numpy.ndarray, uses the `delays`
         and `lag` attributes to return the data as a 2-D Hankel matrix.
@@ -286,7 +326,7 @@ class HAVOK:
         :return: Hankel matrix of data.
         :rtype: numpy.ndarray
         """
-        if not isinstance(X, np.ndarray) or X.ndim > 2:
+        if X.ndim > 2:
             raise ValueError("Data must be a 1-D or 2-D numpy array.")
         if X.ndim == 1:
             X = X[None]
@@ -308,7 +348,7 @@ class HAVOK:
 
         return H
 
-    def dehankel(self, H):
+    def dehankel(self, H: np.ndarray):
         """
         Given a Hankel matrix H as a 2-D numpy.ndarray, uses the `delays`
         and `lag` attributes to unravel the data in the Hankel matrix.
@@ -318,7 +358,7 @@ class HAVOK:
         :return: de-Hankeled (m,) or (n, m) array of data.
         :rtype: numpy.ndarray
         """
-        if not isinstance(H, np.ndarray) or H.ndim != 2:
+        if H.ndim != 2:
             raise ValueError("Data must be a 2-D numpy array.")
 
         Hn, Hm = H.shape
@@ -357,6 +397,14 @@ class HAVOK:
 
         # Compute the Hankel matrix.
         hankel_matrix = self.hankel(X)
+
+        if self._centered:
+            if self._delays % 2 == 0:
+                raise ValueError("Delays must be odd for data centering.")
+            self._center_snapshot = np.copy(
+                hankel_matrix[int((self._delays - 1) / 2)]
+            )
+            hankel_matrix -= np.tile(self._center_snapshot, (self._delays, 1))
 
         # Check the input time information and set the time vector.
         if isinstance(t, (int, float)):
@@ -602,13 +650,99 @@ class HAVOK:
 
         return threshold
 
+    def compute_active_index_slices(
+        self,
+        forcing_threshold=None,
+        min_jump_dist=None,
+        merge_slices=True,
+        chaos_length_range=(0.5, 1.1),
+    ):
+        """
+        :param forcing_threshold: Threshold value at which the absolute value
+            of the forcing signal is considered large enough to be "active".
+        :type forcing_threshold: float
+        :param min_jump_dist: The minimum number of indices used to separate
+            distinct forcing events. Decreasing this parameter will lead to
+            many short forcing events, while increasing this parameter will
+            lead to fewer longer forcing events.
+        :type min_jump_dist: int
+        :param merge_slices: Whether or not to attempt to merge forcing events
+            after applying the min_jump_dist parameter. While min_jump_dist
+            uses index distance as a metric for combining forcing events,
+            merge_slice attempts to combine events based on the estimated
+            length of a forcing event.
+        :type merge_slices: bool
+        :param chaos_length_range: The minimum and maximum allowed length of a
+            chaotic forcing event. If given as positive integers, these values
+            will be taken as the min and max length in terms of the number of
+            indices. If given as positive floats, these values will be used to
+            scale the largest-found chaotic event after applying min_jump_dist.
+            This parameter only activates if merge_slices is `True`.
+        :type chaos_length_range: tuple(int, int) or tuple(float, float)
+        """
+        # Threshold based on the distribution of the first forcing term.
+        if forcing_threshold is None:
+            forcing_threshold = self.compute_threshold(self.forcing[:, 0])
+
+        # Use the time step to estimate a reasonable jump.
+        if min_jump_dist is None:
+            min_jump_dist = int(0.1 / (self._time[1] - self._time[0]))
+
+        # (Re)evaluate the active slices for each forcing term.
+        self._active_slices = []
+        all_inds = np.arange(len(self.forcing))
+
+        for forcing in self.forcing.T:
+            active_inds = all_inds[np.abs(forcing) > forcing_threshold]
+            active_slices = self._get_index_slices(active_inds, min_jump_dist)
+
+            if merge_slices:
+                if isinstance(chaos_length_range[0], float):
+                    # Compute the max and min allowed lengths of each burst.
+                    all_slice_lens = active_slices[:, 1] - active_slices[:, 0]
+                    min_len, max_len = (
+                        np.array(chaos_length_range) * all_slice_lens.max()
+                    )
+                else:
+                    # Use given lengths if chaos_length_range contains ints.
+                    min_len, max_len = chaos_length_range
+
+                # Merge index slices together based on allowed chaos length.
+                active_slices_merged = []
+                active_slices_merged.append(list(active_slices[0]))
+                for ind_a, ind_b in active_slices[1:]:
+                    ind_a_prev, _ = active_slices_merged[-1]
+                    if ind_b - ind_a < min_len and ind_b - ind_a_prev < max_len:
+                        # Merge the current slice with the last slice if
+                        # (a) the current slice is too small, and
+                        # (b) the merged slice isn't too large.
+                        active_slices_merged[-1] = [ind_a_prev, ind_b]
+                    else:
+                        # Otherwise, simply append the slice.
+                        active_slices_merged.append([ind_a, ind_b])
+
+                active_slices = np.array(active_slices_merged)
+
+                # Remove remaining small slices (unless it contains index 0).
+                ind_small_slices = np.arange(len(active_slices))[
+                    active_slices[:, 1] - active_slices[:, 0] < min_len
+                ]
+                if ind_small_slices[0] == 0 and active_slices[0, 0] == 0:
+                    ind_small_slices = ind_small_slices[1:]
+
+                active_slices = np.delete(
+                    active_slices, ind_small_slices, axis=0
+                )
+
+            # Save the newly-computed active slices.
+            self._active_slices.append(active_slices)
+
     def plot_summary(
         self,
         num_plot=None,
         index_linear=(0, 1, 2),
         index_forcing=0,
         forcing_threshold=None,
-        min_jump_dist=None,
         true_switch_indices=None,
         figsize=(20, 4),
         dpi=200,
@@ -638,11 +772,6 @@ class HAVOK:
         :param forcing_threshold: Threshold value at which the absolute value
             of the forcing signal is considered large enough to be "active".
         :type forcing_threshold: float
-        :param min_jump_dist: The minimum number of indices used to separate
-            distinct forcing events. Decreasing this parameter will lead to
-            many short forcing events, while increasing this parameter will
-            lead to fewer longer forcing events.
-        :type min_jump_dist: int
         :param true_switch_indices: Optional vector that contains the indices
             at which true chaotic bursting occurs. If provided, true bursting
             times are plotted on top of the forcing term.
@@ -661,23 +790,28 @@ class HAVOK:
         if num_plot is None:
             num_plot = len(self._delay_embeddings)
 
-        # Compute a threshold based on the distribution of all forcing terms.
-        if forcing_threshold is None:
-            forcing_threshold = self.compute_threshold(
-                self.forcing[:, index_forcing]
-            )
-
-        # Use the time step to estimate a reasonable jump.
-        if min_jump_dist is None:
+        forcing = self.forcing[:, index_forcing]
+        if self._active_slices is not None:
+            # Use the currently-computed active index slices.
+            active_slices = self._active_slices[index_forcing]
+        else:
+            # Otherwise, quickly compute active index slices for plotting.
+            if forcing_threshold is None:
+                forcing_threshold = self.compute_threshold(forcing)
             min_jump_dist = int(0.5 / (self._time[1] - self._time[0]))
+            all_inds = np.arange(len(forcing))
+            active_inds = all_inds[np.abs(forcing) > forcing_threshold]
+            active_slices = self._get_index_slices(active_inds, min_jump_dist)
 
-        # Get index slices at which the forcing is considered active.
-        forcing = self.forcing[:num_plot, index_forcing]
-        active_indices = np.arange(num_plot)[
-            np.abs(forcing) > forcing_threshold
-        ]
-        active_slices = self._get_index_slices(active_indices, min_jump_dist)
+        # Truncate forcing and index slices for plotting.
+        forcing = forcing[:num_plot]
+        active_slices = active_slices.flatten()
+        active_slices = active_slices[active_slices < num_plot]
+        if len(active_slices) % 2 == 1:
+            active_slices = np.append(active_slices, num_plot - 1)
+        active_slices = active_slices.reshape(-1, 2)
 
+        # Proceed with the summary plotting.
         fig = plt.figure(figsize=figsize, dpi=dpi)
         gs = GridSpec(2, 5, figure=fig)
         ax1 = fig.add_subplot(gs[:, 0])
@@ -821,12 +955,12 @@ class HAVOK:
         :Example:
             >>> a = np.array([2, 3, 4, 5, 10, 11, 12, 25, 26, 28])
             >>> _get_index_slices(a, min_jump_dist=2)
-            [(2, 5), (10, 12), (25, 28)]
+            [[2, 5], [10, 12], [25, 28]]
         """
         # Get the locations within x where a significant jump occurs.
         jumps = x[1:] - x[:-1] > min_jump_dist
         jump_starts = np.insert(x[1:][jumps], 0, x[0])
         jump_ends = np.append(x[:-1][jumps], x[-1])
-        index_slices = list(zip(jump_starts, jump_ends))
+        index_slices = np.array(list(zip(jump_starts, jump_ends)))
 
         return index_slices
