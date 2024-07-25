@@ -250,8 +250,6 @@ class HAVOK:
         """
         if self._active_slices is None:
             raise ValueError("You need to call fit().")
-        if None in self._active_slices:
-            warnings.warn("You need to call compute_active_index_slices().")
         return self._active_slices
 
     @property
@@ -490,7 +488,7 @@ class HAVOK:
         self._singular_vecs = U
         self._singular_vals = s
         self._delay_embeddings = V
-        self._active_slices = [None] * self._r
+        self._active_slices = [None] * self._num_chaos
 
         # Save the full HAVOK operator.
         self._havok_operator = havok_operator
