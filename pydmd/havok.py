@@ -249,7 +249,9 @@ class HAVOK:
         :rtype: list
         """
         if self._active_slices is None:
-            raise ValueError("You need to call compute_active_index_slices().")
+            raise ValueError("You need to call fit().")
+        if None in self._active_slices:
+            warnings.warn("You need to call compute_active_index_slices().")
         return self._active_slices
 
     @property
@@ -488,6 +490,7 @@ class HAVOK:
         self._singular_vecs = U
         self._singular_vals = s
         self._delay_embeddings = V
+        self._active_slices = [None] * self._r
 
         # Save the full HAVOK operator.
         self._havok_operator = havok_operator
@@ -528,6 +531,76 @@ class HAVOK:
                 self._compute_embeddings(forcing, time, V0)
             )
         )
+
+    def predict_online(self, X_test, t_test):
+        """
+        Use new snapshot data to make system predictions. Uses the A and B
+        operators along with the rth HAVOK mode and rth singular value in order
+        to compute delay embeddings and reconstruct the given test trajectory.
+
+        :param X_test: the new input snapshots.
+        :type X_test: numpy.ndarray or iterable
+        :param t_test: times of the new input snapshots.
+        :type t_test: numpy.ndarray or iterable
+        :return: reconstructed snapshots and test forcing terms.
+        :rtype: [numpy.ndarray, numpy.ndarray]
+        """
+        if self._centered or self._num_chaos != 1:
+            warnings.warn(
+                "predict_online() currently assumes centered=False "
+                "and num_chaos=1. Unexpected behavior may occur."
+            )
+
+        # Grab the data used for model training.
+        X_train = self.snapshots
+        if np.ndim(X_train) == 1:
+            X_train = X_train[None]
+
+        # Ensure that X_train and X_test have same sizing conventions.
+        X_test = np.squeeze(np.array(X_test))
+        if np.ndim(X_test) == 1:
+            X_test = X_test[None]
+
+        # Input data must have the same spatial dimension as the snapshots.
+        if (
+            np.ndim(X_train) != np.ndim(X_test)
+            or X_train.shape[0] != X_test.shape[0]
+        ):
+            raise ValueError("X_test must have same spatial dimension as X.")
+
+        # Process and check the test time vector.
+        n_test = X_test.shape[-1]
+        dt = self._time[1] - self._time[0]
+        t_test = np.squeeze(np.array(t_test))
+
+        # Test time vector must be the correct length, a continuation
+        # of the training trajectory, and equally-spaced in time.
+        if (
+            len(t_test) != n_test
+            or t_test[0] != self._time[-1] + dt
+            or not np.allclose(t_test[1:] - t_test[:-1], dt)
+        ):
+            raise ValueError(
+                "Test data must contain snapshots from times "
+                f"{np.round(self._time[-1] + dt, decimals=3)}, "
+                f"{np.round(self._time[-1] + 2 * dt, decimals=3)}, "
+                f"{np.round(self._time[-1] + 3 * dt, decimals=3)}, ..."
+            )
+
+        # Construct a Hankel matrix with columns beyond the training set.
+        m_train = self.ho_snapshots.shape[-1]
+        H_test = self.hankel(np.hstack([X_train[:, m_train:], X_test]))
+
+        # Use the rth mode and singular value to construct forcing terms.
+        Ur = self._singular_vecs[:, -1] / self._singular_vals[-1]
+        test_forcing = np.hstack([self.forcing[-1], H_test.T.dot(Ur)])
+        test_time = np.arange(n_test + 1) * dt
+
+        # Return the predicted snapshots and the forcing terms used.
+        # Also remove data points that account for the initial condition.
+        X_pred = self.predict(test_forcing, test_time, V0=-1)
+
+        return X_pred[self._delays :], test_forcing[1:]
 
     @property
     def reconstructed_embeddings(self):
@@ -594,10 +667,11 @@ class HAVOK:
         :return: active threshold for the absolute value of the forcing terms.
         :rtype: float
         """
+        # Establish which values to use for the forcing terms.
         if isinstance(forcing, int):
             forcing = self.forcing[:, forcing]
         else:
-            forcing = np.array(forcing)
+            forcing = np.squeeze(np.array(forcing))
 
         # Compute histogram of the forcing values.
         hy, hx = np.histogram(forcing, bins=bins, density=True)
@@ -652,90 +726,164 @@ class HAVOK:
 
     def compute_active_index_slices(
         self,
+        forcing=0,
         forcing_threshold=None,
         min_jump_dist=None,
         merge_slices=True,
         chaos_length_range=(0.5, 1.1),
+        save=False,
+        plot=False,
+        plot_kwargs=None,
     ):
         """
-        :param forcing_threshold: Threshold value at which the absolute value
+        :param forcing: (m,) array of forcing inputs to be examined.
+            Alternatively, users may provide a non-negative int, which will be
+            used to index the stored forcing terms. By default, the first
+            forcing term stored will be used.
+        :type forcing: {numpy.ndarray, iterable} or int
+        :param forcing_threshold: threshold value at which the absolute value
             of the forcing signal is considered large enough to be "active".
         :type forcing_threshold: float
-        :param min_jump_dist: The minimum number of indices used to separate
+        :param min_jump_dist: the minimum number of indices used to separate
             distinct forcing events. Decreasing this parameter will lead to
             many short forcing events, while increasing this parameter will
             lead to fewer longer forcing events.
         :type min_jump_dist: int
-        :param merge_slices: Whether or not to attempt to merge forcing events
+        :param merge_slices: whether or not to attempt to merge forcing events
             after applying the min_jump_dist parameter. While min_jump_dist
             uses index distance as a metric for combining forcing events,
             merge_slice attempts to combine events based on the estimated
             length of a forcing event.
         :type merge_slices: bool
-        :param chaos_length_range: The minimum and maximum allowed length of a
+        :param chaos_length_range: the minimum and maximum allowed length of a
             chaotic forcing event. If given as positive integers, these values
             will be taken as the min and max length in terms of the number of
             indices. If given as positive floats, these values will be used to
             scale the largest-found chaotic event after applying min_jump_dist.
             This parameter only activates if merge_slices is `True`.
         :type chaos_length_range: tuple(int, int) or tuple(float, float)
+        :param save: whether or not to save the computed active slices. Doing
+            so will allow for its use in functions such as plot_summary().
+            forcing must be provided as a non-negtaive int in order to use this
+            functionality.
+        :type save: bool
+        :param plot: whether or not to plot the computed active slices on top
+            of the forcing values used.
+        :type plot: bool
+        :param plot_kwargs: optional dictionary of plot parameters. Currently,
+            one may set the figure size, the number of data points to plot, and
+            the indices of true switching events if known. Note that the true
+            switching indices are assumed to correspond with the indices of the
+            forcing term used.
+        :type plot_kwargs: dict
+        :return: the computed active index slices.
+        :rtype: numpy.ndarray
         """
-        # Threshold based on the distribution of the first forcing term.
+        # Establish which values to use for the forcing terms.
+        if isinstance(forcing, int) and -1 < forcing < self._num_chaos:
+            index_forcing = forcing
+            forcing = self.forcing[:, index_forcing]
+        else:
+            index_forcing = -1
+            forcing = np.squeeze(np.array(forcing))
+
+        # Threshold based on the distribution of the forcing term.
         if forcing_threshold is None:
-            forcing_threshold = self.compute_threshold(self.forcing[:, 0])
+            forcing_threshold = self.compute_threshold(forcing)
 
         # Use the time step to estimate a reasonable jump.
         if min_jump_dist is None:
-            min_jump_dist = int(0.1 / (self._time[1] - self._time[0]))
+            min_jump_dist = max(int(0.1 / (self._time[1] - self._time[0])), 1)
 
-        # (Re)evaluate the active slices for each forcing term.
-        self._active_slices = []
-        all_inds = np.arange(len(self.forcing))
+        # Evaluate the active slices for the forcing term.
+        all_inds = np.arange(len(forcing))
+        active_inds = all_inds[np.abs(forcing) > forcing_threshold]
+        active_slices = self._get_index_slices(active_inds, min_jump_dist)
 
-        for forcing in self.forcing.T:
-            active_inds = all_inds[np.abs(forcing) > forcing_threshold]
-            active_slices = self._get_index_slices(active_inds, min_jump_dist)
+        if merge_slices:
+            if isinstance(chaos_length_range[0], float):
+                # Compute the max and min allowed lengths of each burst.
+                all_slice_lens = active_slices[:, 1] - active_slices[:, 0]
+                min_len, max_len = (
+                    np.array(chaos_length_range) * all_slice_lens.max()
+                )
+            else:
+                # Use given lengths if chaos_length_range contains ints.
+                min_len, max_len = chaos_length_range
 
-            if merge_slices:
-                if isinstance(chaos_length_range[0], float):
-                    # Compute the max and min allowed lengths of each burst.
-                    all_slice_lens = active_slices[:, 1] - active_slices[:, 0]
-                    min_len, max_len = (
-                        np.array(chaos_length_range) * all_slice_lens.max()
+            # Merge index slices together based on allowed chaos length.
+            active_slices_merged = []
+            active_slices_merged.append(list(active_slices[0]))
+            for ind_a, ind_b in active_slices[1:]:
+                ind_a_prev, _ = active_slices_merged[-1]
+                if ind_b - ind_a < min_len and ind_b - ind_a_prev < max_len:
+                    # Merge the current slice with the last slice if
+                    # (a) the current slice is too small, and
+                    # (b) the merged slice isn't too large.
+                    active_slices_merged[-1] = [ind_a_prev, ind_b]
+                else:
+                    # Otherwise, simply append the slice.
+                    active_slices_merged.append([ind_a, ind_b])
+
+            active_slices = np.array(active_slices_merged)
+
+            # Remove remaining small slices (unless it contains index 0).
+            ind_small_slices = np.arange(len(active_slices))[
+                active_slices[:, 1] - active_slices[:, 0] < min_len
+            ]
+            if (
+                len(ind_small_slices) > 0
+                and ind_small_slices[0] == 0
+                and active_slices[0, 0] == 0
+            ):
+                ind_small_slices = ind_small_slices[1:]
+
+            active_slices = np.delete(active_slices, ind_small_slices, axis=0)
+
+        # Save the computed active slices.
+        if save and -1 < index_forcing < self._num_chaos:
+            self._active_slices[index_forcing] = active_slices
+
+        if plot:
+            # Set the plotting parameters first.
+            if plot_kwargs is None:
+                plot_kwargs = {}
+            if "figsize" not in plot_kwargs:
+                plot_kwargs["figsize"] = (12, 4)
+            if "num_plot" not in plot_kwargs:
+                plot_kwargs["num_plot"] = len(forcing)
+            if "true_switch" not in plot_kwargs:
+                plot_kwargs["true_switch"] = None
+
+            plt.figure(figsize=plot_kwargs["figsize"])
+            plt.plot(forcing[: plot_kwargs["num_plot"]], lw=2, c="k")
+
+            for j, (ind1, ind2) in enumerate(active_slices):
+                if j == 0:
+                    plt.plot(
+                        forcing[ind1:ind2], lw=2, c="r", label="Forcing active"
                     )
                 else:
-                    # Use given lengths if chaos_length_range contains ints.
-                    min_len, max_len = chaos_length_range
+                    plt.plot(forcing[ind1:ind2], lw=2, c="r")
 
-                # Merge index slices together based on allowed chaos length.
-                active_slices_merged = []
-                active_slices_merged.append(list(active_slices[0]))
-                for ind_a, ind_b in active_slices[1:]:
-                    ind_a_prev, _ = active_slices_merged[-1]
-                    if ind_b - ind_a < min_len and ind_b - ind_a_prev < max_len:
-                        # Merge the current slice with the last slice if
-                        # (a) the current slice is too small, and
-                        # (b) the merged slice isn't too large.
-                        active_slices_merged[-1] = [ind_a_prev, ind_b]
-                    else:
-                        # Otherwise, simply append the slice.
-                        active_slices_merged.append([ind_a, ind_b])
-
-                active_slices = np.array(active_slices_merged)
-
-                # Remove remaining small slices (unless it contains index 0).
-                ind_small_slices = np.arange(len(active_slices))[
-                    active_slices[:, 1] - active_slices[:, 0] < min_len
+            if plot_kwargs["true_switch"] is not None:
+                plot_kwargs["true_switch"] = plot_kwargs["true_switch"][
+                    plot_kwargs["true_switch"] < plot_kwargs["num_plot"]
                 ]
-                if ind_small_slices[0] == 0 and active_slices[0, 0] == 0:
-                    ind_small_slices = ind_small_slices[1:]
-
-                active_slices = np.delete(
-                    active_slices, ind_small_slices, axis=0
+                plt.plot(
+                    forcing[plot_kwargs["true_switch"]],
+                    "*",
+                    mec="k",
+                    mfc="yellow",
+                    ms=10,
+                    label="True Switch",
                 )
 
-            # Save the newly-computed active slices.
-            self._active_slices.append(active_slices)
+            plt.yticks([])
+            plt.legend()
+            plt.show()
+
+        return active_slices
 
     def plot_summary(
         self,
@@ -791,14 +939,14 @@ class HAVOK:
             num_plot = len(self._delay_embeddings)
 
         forcing = self.forcing[:, index_forcing]
-        if self._active_slices is not None:
+        if self._active_slices[index_forcing] is not None:
             # Use the currently-computed active index slices.
             active_slices = self._active_slices[index_forcing]
         else:
             # Otherwise, quickly compute active index slices for plotting.
             if forcing_threshold is None:
                 forcing_threshold = self.compute_threshold(forcing)
-            min_jump_dist = int(0.5 / (self._time[1] - self._time[0]))
+            min_jump_dist = max(int(0.5 / (self._time[1] - self._time[0])), 1)
             all_inds = np.arange(len(forcing))
             active_inds = all_inds[np.abs(forcing) > forcing_threshold]
             active_slices = self._get_index_slices(active_inds, min_jump_dist)
