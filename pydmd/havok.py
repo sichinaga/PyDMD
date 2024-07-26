@@ -532,21 +532,21 @@ class HAVOK:
 
     def predict_online(self, X_test, t_test):
         """
-        Use new snapshot data to make system predictions. Uses the A and B
-        operators along with the rth HAVOK mode and rth singular value in order
-        to compute delay embeddings and reconstruct the given test trajectory.
+        Use new snapshot data to make system reconstructions. Uses the A and B
+        operators along with the HAVOK modes and singular values in order to
+        compute delay embeddings and reconstruct the given test trajectory.
 
         :param X_test: the new input snapshots.
         :type X_test: numpy.ndarray or iterable
         :param t_test: times of the new input snapshots.
         :type t_test: numpy.ndarray or iterable
-        :return: reconstructed snapshots and test forcing terms.
+        :return: reconstructed snapshots and forcing terms used.
         :rtype: [numpy.ndarray, numpy.ndarray]
         """
         if self._centered or self._num_chaos != 1:
             warnings.warn(
-                "predict_online() currently assumes centered=False "
-                "and num_chaos=1. Unexpected behavior may occur."
+                "predict_online() currently assumes centered = False "
+                "and num_chaos = 1. Unexpected behavior may occur."
             )
 
         # Grab the data used for model training.
@@ -554,7 +554,7 @@ class HAVOK:
         if np.ndim(X_train) == 1:
             X_train = X_train[None]
 
-        # Ensure that X_train and X_test have same sizing conventions.
+        # Ensure that X_train and X_test have the same sizing conventions.
         X_test = np.squeeze(np.array(X_test))
         if np.ndim(X_test) == 1:
             X_test = X_test[None]
@@ -571,34 +571,34 @@ class HAVOK:
         dt = self._time[1] - self._time[0]
         t_test = np.squeeze(np.array(t_test))
 
-        # Test time vector must be the correct length, a continuation
-        # of the training trajectory, and equally-spaced in time.
-        if (
-            len(t_test) != n_test
-            or t_test[0] != self._time[-1] + dt
-            or not np.allclose(t_test[1:] - t_test[:-1], dt)
+        # Time vector must be the correct length and equally-spaced in time.
+        if len(t_test) != n_test or not np.allclose(
+            t_test[1:] - t_test[:-1], dt
         ):
             raise ValueError(
-                "Test data must contain snapshots from times "
-                f"{np.round(self._time[-1] + dt, decimals=3)}, "
-                f"{np.round(self._time[-1] + 2 * dt, decimals=3)}, "
-                f"{np.round(self._time[-1] + 3 * dt, decimals=3)}, ..."
+                f"Please provide a 1-D array of {n_test} time values with "
+                f"a time-step of approximately {np.round(dt, decimals=4)}."
             )
 
         # Construct a Hankel matrix with columns beyond the training set.
-        m_train = self.ho_snapshots.shape[-1]
-        H_test = self.hankel(np.hstack([X_train[:, m_train:], X_test]))
+        # Use modes and singular values to obtain the initial embeddings.
+        H_test = self.hankel(X_test)
+        U = self._singular_vecs
+        S = np.diag(self._singular_vals)
+        # Note: this vector includes the initial v1, v2, ..., vr.
+        V0 = np.linalg.multi_dot(
+            [np.linalg.inv(S), U.conj().T, H_test[:, 0]]
+        ).conj()
 
         # Use the rth mode and singular value to construct forcing terms.
-        Ur = self._singular_vecs[:, -1] / self._singular_vals[-1]
-        test_forcing = np.hstack([self.forcing[-1], H_test.T.dot(Ur)])
-        test_time = np.arange(n_test + 1) * dt
+        Ur = self._singular_vecs[:, -1].conj() / self._singular_vals[-1]
+        test_forcing = H_test.T.dot(Ur)
+        test_time = np.arange(len(test_forcing)) * dt
 
         # Return the predicted snapshots and the forcing terms used.
-        # Also remove data points that account for the initial condition.
-        X_pred = self.predict(test_forcing, test_time, V0=-1)
+        X_pred = self.predict(test_forcing, test_time, V0=V0[:-1])
 
-        return X_pred[self._delays :], test_forcing[1:]
+        return X_pred, test_forcing
 
     @property
     def reconstructed_embeddings(self):
