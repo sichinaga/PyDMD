@@ -570,9 +570,15 @@ class BOPDMDOperator(DMDOperator):
             # Compute B using least squares.
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
 
-            # Apply proximal operator if given, and if data isn't projected.
-            if self._mode_prox is not None and not self._use_proj:
-                B = self._mode_prox(B)
+            # Apply proximal operator if given.
+            if self._mode_prox is not None:
+                if self._use_proj:
+                    # Unproject the modes first.
+                    B_unproj = B.dot(self._proj_basis.T)
+                    B_unproj = self._mode_prox(B_unproj)
+                    B = B_unproj.dot(self._proj_basis.conj())
+                else:
+                    B = self._mode_prox(B)
 
             return B
 
