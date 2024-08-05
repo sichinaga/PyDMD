@@ -114,28 +114,6 @@ def get_nonzero_cols(X: np.ndarray, tol=1e-16):
     return np.nonzero(np.any(X, axis=0))[0]
 
 
-def backtracking_line_search(
-    x0: np.ndarray,
-    dx: np.ndarray,
-    func_f: Callable,
-    grad_f: Callable,
-    t0: float,
-    t_up: float,
-    grad_scale: float,
-):
-    """
-    Backtracking line search.
-    """
-    t = t0
-    f0 = func_f(x0)
-    f_new = func_f(x0 + t * dx)
-    df0 = grad_scale * np.vdot(dx, grad_f(x0))
-    while f_new > f0 + t * df0:
-        t *= t_up
-        f_new = func_f(x0 + t * dx)
-    return t
-
-
 def accelerated_prox_grad(
     X0: np.ndarray,
     func_f: Callable,

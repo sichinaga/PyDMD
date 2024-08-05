@@ -27,7 +27,6 @@ from .sbopdmd_utils import (
     accelerated_prox_grad,
     get_nonzero_cols,
     split_B,
-    backtracking_line_search,
 )
 
 
@@ -42,7 +41,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         compute_A,
         use_proj,
         use_mask,
-        use_svrg,
         init_alpha,
         init_B,
         proj_basis,
@@ -67,9 +65,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         prox_grad_tol=1e-6,
         prox_grad_maxiter=1000,
         prox_grad_restart=True,
-        line_search_t0=1.0,
-        line_search_t_up=0.5,
-        line_search_grad_scale=0.1,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -100,8 +95,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._unmasked_features = unmasked_features
         self._unmasked_features_computed = None
 
-        # Parameters for random feature sampling and SVRG.
-        self._use_svrg = use_svrg
+        # Parameters for random feature sampling.
         self._sampling_ratio = sampling_ratio
         if sampling_rng is None:
             self._sampling_rng = np.random.default_rng()
@@ -124,12 +118,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._prox_grad_params["tol"] = prox_grad_tol
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
         self._prox_grad_params["use_restarts"] = prox_grad_restart
-
-        # Set the parameters of backtracking line search.
-        self._line_search_params = {}
-        self._line_search_params["t0"] = line_search_t0
-        self._line_search_params["t_up"] = line_search_t_up
-        self._line_search_params["grad_scale"] = line_search_grad_scale
 
     @property
     def unmasked_features(self):
@@ -264,62 +252,6 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         return alpha_0
 
-    def _compute_alpha_svrg(
-        self, B, alpha_0, H, t, Phi, sampled_inds, alpha_grad_all
-    ):
-        """
-        Use SVRG to step alpha for the current B.
-        """
-        N_s = len(sampled_inds)
-        H_s = H[:, sampled_inds]
-        B_s = B[:, sampled_inds]
-
-        # Objective function wrt alpha.
-        def func_f(z):
-            z = self._push_eigenvalues(z)
-            obj = np.linalg.norm(H_s - Phi(z, t).dot(B_s), "fro") ** 2
-            obj *= 0.5 # * (1 / N_s)
-            return obj
-
-        # Objective function gradient wrt alpha.
-        def grad_f(z):
-            grad = -np.diag(
-                np.linalg.multi_dot(
-                    [
-                        B_s,
-                        (H_s - Phi(z, t).dot(B_s)).T,
-                        np.diag(t),
-                        Phi(z, t),
-                    ]
-                )
-            )
-            # grad *= 1 / N_s
-            return grad
-
-        # (1) Update the gradient for each of the updated features.
-        R_s = H_s - Phi(alpha_0, t).dot(B_s)
-        alpha_grad_new = -np.multiply(
-            B_s,
-            np.linalg.multi_dot([Phi(alpha_0, t).T, np.diag(t), R_s]),
-        )
-        alpha_grad_updates = alpha_grad_new - alpha_grad_all[:, sampled_inds]
-        alpha_grad_avg_update = np.average(alpha_grad_updates, axis=1)
-        alpha_grad_avg = np.average(alpha_grad_all, axis=1)
-
-        # (2) Get the new descent direction d and the new step size t.
-        svrg_d = -(alpha_grad_avg + alpha_grad_avg_update)
-        svrg_t = backtracking_line_search(
-            alpha_0, svrg_d, func_f, grad_f, **self._line_search_params
-        )
-        alpha_new = self._push_eigenvalues(alpha_0 + svrg_t * svrg_d)
-        if self._verbose:
-            print(f"Line search step size found: {svrg_t}\n")
-
-        # (3) Update and return the alpha gradients.
-        alpha_grad_all[:, sampled_inds] = alpha_grad_new
-
-        return alpha_new, alpha_grad_all
-
     def _variable_projection(self, H, t, init_alpha, Phi, dPhi):
         """
         Variable projection routine for multivariate data with regularization.
@@ -353,17 +285,6 @@ class sBOPDMDOperator(BOPDMDOperator):
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
         else:
             B = np.copy(self._init_B)
-
-        # Set the objective gradient for each feature.
-        if self._use_svrg:
-            # (r, N) matrix of gradients -- the average across all
-            # N features should approximate the gradient wrt alpha.
-            alpha_grad_all = -np.multiply(
-                B,
-                np.linalg.multi_dot(
-                    [Phi(alpha, t).T, np.diag(t), H - Phi(alpha, t).dot(B)]
-                ),
-            )
 
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
@@ -399,28 +320,22 @@ class sBOPDMDOperator(BOPDMDOperator):
                 B[:, sampled_inds], alpha, H[:, sampled_inds], t, Phi
             )
 
-            if self._use_svrg:
-                # Take an SVRG step to update alpha.
-                alpha_new, alpha_grad_all = self._compute_alpha_svrg(
-                    B_new, alpha, H, t, Phi, sampled_inds, alpha_grad_all
+            # Take a Levenberg-Marquardt step to update alpha.
+            if self._use_proj:
+                B_new_proj = B_new.dot(self._proj_basis.conj())
+                alpha_new = self._compute_alpha_levmarq(
+                    B_new_proj,
+                    alpha,
+                    H_proj,
+                    t,
+                    Phi,
+                    dPhi,
+                    **self._lev_marq_params,
                 )
             else:
-                # Take a Levenberg-Marquardt step to update alpha.
-                if self._use_proj:
-                    B_new_proj = B_new.dot(self._proj_basis.conj())
-                    alpha_new = self._compute_alpha_levmarq(
-                        B_new_proj,
-                        alpha,
-                        H_proj,
-                        t,
-                        Phi,
-                        dPhi,
-                        **self._lev_marq_params,
-                    )
-                else:
-                    alpha_new = self._compute_alpha_levmarq(
-                        B_new, alpha, H, t, Phi, dPhi, **self._lev_marq_params
-                    )
+                alpha_new = self._compute_alpha_levmarq(
+                    B_new, alpha, H, t, Phi, dPhi, **self._lev_marq_params
+                )
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
@@ -549,7 +464,6 @@ class SparseBOPDMD(BOPDMD):
         compute_A: bool = False,
         use_proj: bool = True,
         use_mask: bool = True,
-        use_svrg: bool = False,
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
@@ -584,7 +498,6 @@ class SparseBOPDMD(BOPDMD):
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
         self._use_mask = use_mask
-        self._use_svrg = use_svrg
         self._init_B = init_B
         self._unmasked_features = unmasked_features
         self._sampling_ratio = sampling_ratio
@@ -730,7 +643,6 @@ class SparseBOPDMD(BOPDMD):
             self._compute_A,
             self._use_proj,
             self._use_mask,
-            self._use_svrg,
             self._init_alpha,
             self._init_B,
             self._proj_basis,
