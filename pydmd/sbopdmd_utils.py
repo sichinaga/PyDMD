@@ -34,31 +34,52 @@ def L2_norm_squared(X: np.ndarray):
     return np.sum(np.abs(X) ** 2)
 
 
+def sign(X: np.ndarray):
+    """
+    Returns the sign of the entires of X, element-wise.
+    Entries may be real, complex, or zero.
+    """
+    signs = np.zeros(X.shape, dtype="complex")
+    inds_nonzero = X != 0.0
+    signs[inds_nonzero] = np.divide(X[inds_nonzero], np.abs(X[inds_nonzero]))
+
+    return signs
+
+
 def hard_threshold(X: np.ndarray, gamma: float):
     """
     Hard thresholding for the L0 norm.
     """
-    X[np.abs(X) ** 2 < 2 * gamma] = 0.0
-    return X
+    X_thres = np.copy(X)
+    X_thres[np.abs(X_thres) ** 2 < 2 * gamma] = 0.0
+
+    return X_thres
 
 
 def soft_threshold(X: np.ndarray, gamma: float):
     """
     Soft thresholding for the L1 norm.
     """
-    return np.sign(X) * np.maximum(np.abs(X) - gamma, 0.0)
+    X_thres = np.multiply(sign(X), np.maximum(np.abs(X) - gamma, 0.0))
+
+    return X_thres
 
 
 def group_lasso(X: np.ndarray, gamma: float):
     """
     Proximal operator for the L2 norm, applied column-wise.
     """
+    # Get the column indices at which the L2 norm is small.
     col_norms = np.linalg.norm(X, 2, axis=0)
-    inds_small = col_norms <= gamma
+    inds_small = col_norms < gamma
     col_norms[inds_small] = 1.0
-    X[:, inds_small] = 0.0
-    X = X.dot(np.diag(1.0 - (gamma / col_norms)))
-    return X
+
+    # Threshold the given matrix.
+    X_thres = np.copy(X)
+    X_thres[:, inds_small] = 0.0
+    X_thres = X_thres.dot(np.diag(1.0 - (gamma / col_norms)))
+
+    return X_thres
 
 
 def scaled_hard_threshold(
@@ -71,8 +92,9 @@ def scaled_hard_threshold(
     Scaled hard thresholding for the L0 norm and L2 norm squared.
     """
     scale = 1 / (1 + (2 * gamma * beta))
-    X = hard_threshold(X, (gamma * alpha) / scale)
-    return X * scale
+    X_thres = scale * hard_threshold(X, (gamma * alpha) / scale)
+
+    return X_thres
 
 
 def scaled_soft_threshold(
@@ -85,8 +107,9 @@ def scaled_soft_threshold(
     Scaled soft thresholding for the L1 norm and L2 norm squared.
     """
     scale = 1 / (1 + (2 * gamma * beta))
-    X = soft_threshold(X, gamma * alpha)
-    return X * scale
+    X_thres = scale * soft_threshold(X, gamma * alpha)
+
+    return X_thres
 
 
 def split_B(B: np.ndarray):
@@ -94,23 +117,28 @@ def split_B(B: np.ndarray):
     Split the given amplitude-scaled mode matrix into a normalized mode
     matrix and an array of mode amplitudes.
     """
+    # Get the mode amplitudes.
     b = np.linalg.norm(B, axis=1)
 
     # Remove extremely small-amplitude modes.
     inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
     b[inds_small] = 1.0
-    B = np.diag(1 / b).dot(B)
-    B[inds_small] = 0.0
+
+    # Divide the amplitudes out from B.
+    B_normalized = np.diag(1 / b).dot(B)
+    B_normalized[inds_small] = 0.0
     b[inds_small] = 0.0
 
-    return B, b
+    return B_normalized, b
 
 
 def get_nonzero_cols(X: np.ndarray, tol=1e-16):
     """
     Return the indices of the columns of X that are not the zero vector.
     """
+    X = np.copy(X)
     X[np.abs(X) < tol] = 0.0
+
     return np.nonzero(np.any(X, axis=0))[0]
 
 

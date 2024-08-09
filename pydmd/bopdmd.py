@@ -156,6 +156,7 @@ class BOPDMDOperator(DMDOperator):
         eps_stall=1e-12,
         use_fulljac=True,
         verbose=False,
+        threshold_iters=1,
     ):
         self._compute_A = compute_A
         self._use_proj = use_proj
@@ -166,6 +167,7 @@ class BOPDMDOperator(DMDOperator):
         self._eig_sort = eig_sort
         self._eig_constraints = eig_constraints
         self._mode_prox = mode_prox
+        self._threshold_iters = threshold_iters
         self._remove_bad_bags = remove_bad_bags
         self._bag_warning = bag_warning
         self._bag_maxfail = bag_maxfail
@@ -574,11 +576,24 @@ class BOPDMDOperator(DMDOperator):
             if self._mode_prox is not None:
                 if self._use_proj:
                     # Unproject the modes first.
-                    B_unproj = B.dot(self._proj_basis.T)
-                    B_unproj = self._mode_prox(B_unproj)
-                    B = B_unproj.dot(self._proj_basis.conj())
-                else:
-                    B = self._mode_prox(B)
+                    B = B.dot(self._proj_basis.T)
+
+                # Apply thresholding.
+                B = self._mode_prox(B)
+
+                # Apply sequential thresholding.
+                for _ in range(self._threshold_iters):
+                    for j in range(IS):
+                        big_inds = B[:, j] != 0.0
+                        B[big_inds, j] = np.linalg.lstsq(
+                            Phi(alpha, t)[:, big_inds],
+                            H[:, j],
+                            rcond=None,
+                        )[0]
+
+                if self._use_proj:
+                    # Project the modes back.
+                    B = B.dot(self._proj_basis.conj())
 
             return B
 

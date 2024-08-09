@@ -2,6 +2,7 @@
 Derived module from bopdmd.py for BOP-DMD with sparse modes.
 """
 
+import warnings
 from numbers import Number
 from typing import Callable, Union
 from inspect import isfunction
@@ -30,7 +31,7 @@ from .sbopdmd_utils import (
 )
 
 
-class sBOPDMDOperator(BOPDMDOperator):
+class SparseBOPDMDOperator(BOPDMDOperator):
     """
     BOP-DMD operator with sparse modes.
     """
@@ -44,7 +45,6 @@ class sBOPDMDOperator(BOPDMDOperator):
         init_alpha,
         init_B,
         proj_basis,
-        unmasked_features,
         sampling_ratio,
         num_trials,
         trial_size,
@@ -92,8 +92,7 @@ class sBOPDMDOperator(BOPDMDOperator):
 
         # Information for pixel masking.
         self._use_mask = use_mask
-        self._unmasked_features = unmasked_features
-        self._unmasked_features_computed = None
+        self._unmasked_features = None
 
         # Parameters for random feature sampling.
         self._sampling_ratio = sampling_ratio
@@ -102,6 +101,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         else:
             self._sampling_rng = sampling_rng
 
+        # General variable projection parameters.
         self._maxiter = maxiter
         self._tol = tol
         self._eps_stall = eps_stall
@@ -113,7 +113,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         self._lev_marq_params["maxlam"] = maxlam
         self._lev_marq_params["lamup"] = lamup
 
-        # Set the parameters of accelerated prox gradient descent.
+        # Set the parameters of accelerated prox-gradient descent.
         self._prox_grad_params = {}
         self._prox_grad_params["tol"] = prox_grad_tol
         self._prox_grad_params["max_iter"] = prox_grad_maxiter
@@ -122,16 +122,16 @@ class sBOPDMDOperator(BOPDMDOperator):
     @property
     def unmasked_features(self):
         """
-        Get the indices of the nonzero variables.
-        """
-        if self._unmasked_features is not None:
-            return self._unmasked_features
+        Get the indices of the active features.
 
-        return self._unmasked_features_computed
+        :return: the indices of the active features.
+        :rtype: numpy.ndarray
+        """
+        return self._unmasked_features
 
     def _compute_B(self, B0, alpha, H, t, Phi):
         """
-        Use accelerated prox gradient to update B for the current alpha.
+        Use accelerated prox-gradient to update B for the current alpha.
         """
         A = Phi(alpha, t)
         beta_f = np.linalg.norm(A, 2) ** 2
@@ -174,29 +174,20 @@ class sBOPDMDOperator(BOPDMDOperator):
         """
         Use Levenberg-Marquardt to step alpha for the current B.
         """
-
-        def objective_func(B, alpha, H):
-            """
-            Compute the current objective.
-            """
-            residual = H - Phi(alpha, t).dot(B)
-            objective = 0.5 * np.linalg.norm(residual, "fro") ** 2
-            objective += self._mode_regularizer(B)
-
-            # Scale by the number of features.
-            objective /= H.shape[1]
-
-            return objective
-
         # Define M, IS, and IA.
         M, IS = H.shape
         IA = len(alpha_0)
 
+        # Initialize storage for Jacobian computations.
         djac_matrix = np.zeros((M * IS, IA), dtype="complex")
         rjac = np.zeros((2 * IA, IA), dtype="complex")
         scales = np.zeros(IA)
-        objective = objective_func(B, alpha_0, H)
+
+        # Initialize the current objective and residual.
+        # Note: Here, we only use the objective to compare the quality of
+        # different alpha results, hence we omit the regularizer portion.
         residual = H - Phi(alpha_0, t).dot(B)
+        objective = np.linalg.norm(residual, "fro") ** 2
 
         for i in range(IA):
             # Build the Jacobian matrix by looping over all alpha indices.
@@ -226,9 +217,11 @@ class sBOPDMDOperator(BOPDMDOperator):
             rjac[IA:] = _lambda * np.diag(scales_pvt)
             delta = np.linalg.lstsq(rjac, rhs, rcond=None)[0]
             delta = delta[ij_pvt]
+
             # Compute the updated alpha vector.
             alpha_updated = alpha_0.ravel() + delta.ravel()
             alpha_updated = self._push_eigenvalues(alpha_updated)
+
             return alpha_updated
 
         for j in range(maxlam + 1):
@@ -237,7 +230,8 @@ class sBOPDMDOperator(BOPDMDOperator):
 
             # Take a step using our step size lam.
             alpha_new = step(lam)
-            objective_new = objective_func(B, alpha_new, H)
+            residual_new = H - Phi(alpha_new, t).dot(B)
+            objective_new = np.linalg.norm(residual_new, "fro") ** 2
 
             # If the objective improved, terminate.
             if objective_new < objective:
@@ -257,7 +251,7 @@ class sBOPDMDOperator(BOPDMDOperator):
         Variable projection routine for multivariate data with regularization.
         """
 
-        def objective_func(B, alpha):
+        def get_objective(B, alpha):
             """
             Compute the current objective.
             """
@@ -269,6 +263,11 @@ class sBOPDMDOperator(BOPDMDOperator):
             objective /= N
 
             return objective
+
+        # Set additional Levenberg-Marquardt parameters.
+        self._lev_marq_params["t"] = t
+        self._lev_marq_params["Phi"] = Phi
+        self._lev_marq_params["dPhi"] = dPhi
 
         # Record the original data set size (number of features).
         N = H.shape[1]
@@ -298,19 +297,21 @@ class sBOPDMDOperator(BOPDMDOperator):
         for itr in range(self._maxiter):
             # Obtain a sample of the feature indices for speed-up.
             if self._use_mask:
-                if self._unmasked_features is not None:
-                    valid_feature_inds = self._unmasked_features
-                    mask = np.setdiff1d(np.arange(N), self._unmasked_features)
-                    B[:, mask] = 0.0
-                else:
-                    valid_feature_inds = get_nonzero_cols(B)
-                    self._unmasked_features_computed = valid_feature_inds
+                valid_feature_inds = get_nonzero_cols(B)
+                self._unmasked_features = valid_feature_inds
             else:
                 valid_feature_inds = np.arange(N)
 
+            # Number of features that will be updated this iteration.
+            sample_size = min(
+                len(valid_feature_inds),
+                int(N * self._sampling_ratio),
+            )
+
+            # Indices of the features that will be updated this iteration.
             sampled_inds = self._sampling_rng.choice(
                 valid_feature_inds,
-                size=int(self._sampling_ratio * len(valid_feature_inds)),
+                size=sample_size,
                 replace=False,
             )
 
@@ -324,23 +325,17 @@ class sBOPDMDOperator(BOPDMDOperator):
             if self._use_proj:
                 B_new_proj = B_new.dot(self._proj_basis.conj())
                 alpha_new = self._compute_alpha_levmarq(
-                    B_new_proj,
-                    alpha,
-                    H_proj,
-                    t,
-                    Phi,
-                    dPhi,
-                    **self._lev_marq_params,
+                    B_new_proj, alpha, H_proj, **self._lev_marq_params
                 )
             else:
                 alpha_new = self._compute_alpha_levmarq(
-                    B_new, alpha, H, t, Phi, dPhi, **self._lev_marq_params
+                    B_new, alpha, H, **self._lev_marq_params
                 )
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
             err_B = np.linalg.norm(B - B_new)
-            all_obj[itr] = objective_func(B_new, alpha_new)
+            all_obj[itr] = get_objective(B_new, alpha_new)
             all_err[itr] = err_alpha + err_B
 
             # Update information.
@@ -423,36 +418,49 @@ class sBOPDMDOperator(BOPDMDOperator):
 
 class SparseBOPDMD(BOPDMD):
     """
-    Dynamic Mode Decomposition with sparse modes.
+    Bagging, Optimized Dynamic Mode Decomposition with sparse modes.
 
     :param mode_regularizer: Regularizer portion of the objective function
-        given matrix input X. Can be a function, or one of the following preset
-        regularizers. Note that if a preset regularizer is used, the mode_prox
-        function will be precomputed and will not need to be provided by the
-        user. Use regularizer_params instead if using a preset.
-        - "l0" (scaled L0 norm)
-        - "l1" (scaled L1 norm)
-        - "l2" (scaled L2 norm)
-        - "l02" (scaled L0 norm + scaled L2 norm squared)
-        - "l12" (scaled L1 norm + scaled L2 norm squared)
+        given matrix input X. May be a function, or one of the following preset
+        regularizer options. Note that if a preset regularizer is used, the
+        `mode_prox` function will be precomputed based on the chosen preset and
+        will not need to be provided by the user. Use the `regularizer_params`
+        option to set regularizer parameters if using a preset.
+        - "l0": scaled L0 norm
+        - "l1": scaled L1 norm
+        - "l2": scaled L2 norm
+        - "l02": scaled L0 norm + scaled L2 norm squared
+        - "l12": scaled L1 norm + scaled L2 norm squared
     :type mode_regularizer: str or function
     :param regularizer_params: Dictionary of parameters for the mode
-        regularizer to be used if a preset regularizer is requested.
-        - "lambda" - Scaling for the first norm term (used by all presets).
+        regularizer, to be used if a preset regularizer is requested.
+        Accounts for the following parameters:
+        - "lambda": Scaling for the first norm term (used by all presets).
             Defaults to 1.0.
-        - "lambda_2" - Scaling for the L2 norm squared (used by "l02", "l12").
+        - "lambda_2": Scaling for the second norm term (used by "l02", "l12").
             Defaults to 1e-6.
     :type regularizer_params: dict
-    :param use_mask:
+    :param use_mask: Flag that determines whether or not to ignore features
+        that are deemed inactive during the variable projection routine. If
+        `True`, features that are eliminated due to sparsity are ignored during
+        future variable projection iterations. If `False`, all features are
+        updated at every iteration of variable projection.
     :type use_mask: bool
-    :param init_B:
-    :type init_B: np.ndarray
-    :param unmasked_features:
-    :type unmasked_features:
-    :param sampling_ratio:
+    :param init_B: Initial guess for the amplitude-scaled DMD modes.
+        Defaults to using the relationship H = Phi(init_alpha)init_B.
+    :type init_B: numpy.ndarray
+    :param sampling_ratio: Size of the subset of mode features to update at
+        each iteration of variable projection. Must be a value within the range
+        (0.0, 1.0], in which case int(sampling_ratio * n) random features will
+        be updated per iteration, where n denotes the total number of features.
+        If `use_mask=True` and the number of unmasked features becomes smaller
+        than int(sampling_ratio * n), then all of the unmasked features will be
+        updated at each iteration. Defaults to 1.0.
     :type sampling_ratio: float
-    :param mode_prox: Proximal operator of the given mode_regularizer function
-        given matrix input X and a constant float.
+    :param mode_prox: Proximal operator associated with the `mode_regularizer`
+        function, which takes matrix input X and a constant float. Note that
+        this parameter must be provided if `mode_regularizer` is given as a
+        custom function.
     :type mode_prox: function
     """
 
@@ -467,8 +475,7 @@ class SparseBOPDMD(BOPDMD):
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
-        unmasked_features: np.ndarray = None,
-        sampling_ratio: float = 0.2,
+        sampling_ratio: float = 1.0,
         num_trials: int = 0,
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
@@ -499,82 +506,112 @@ class SparseBOPDMD(BOPDMD):
         self._regularizer_params = regularizer_params
         self._use_mask = use_mask
         self._init_B = init_B
-        self._unmasked_features = unmasked_features
         self._sampling_ratio = sampling_ratio
 
+        # Ensure the validity of the given mode regularizer.
+        supported_regularizers = ("l0", "l1", "l2", "l02", "l12")
+        if (
+            isinstance(self._mode_regularizer, str)
+            and self._mode_regularizer not in supported_regularizers
+        ):
+            raise ValueError(
+                "Invalid mode_regularizer preset provided. "
+                f"Please choose from one of {supported_regularizers}."
+            )
+        if isfunction(self._mode_regularizer) and self._mode_prox is None:
+            raise ValueError(
+                "Custom mode_regularizer was provided without mode_prox. "
+                "Please provide the corresponding proximal operator function."
+            )
+
+        # Set the parameters of the preset regularizer.
         if self._regularizer_params is None:
             self._regularizer_params = {}
         if "lambda" not in self._regularizer_params:
             self._regularizer_params["lambda"] = 1.0
         if "lambda_2" not in self._regularizer_params:
             self._regularizer_params["lambda_2"] = 1e-6
+        if self._regularizer_params.keys() - ["lambda", "lambda_2"]:
+            warnings.warn(
+                "Parameters other than 'lambda' and 'lambda_2' were provided. "
+                "These extra parameters will be ignored, so please be sure to "
+                "set the parameters 'lambda' and/or 'lambda_2'."
+            )
 
-    def mode_regularizer(self, X):
+    def mode_regularizer(self, X: np.ndarray):
         """
-        Apply the mode regularizer to the matrix X.
+        Apply the mode regularizer function to the matrix X.
+
+        :param X: (n, m) numpy array.
+        :type X: numpy.ndarray
+        :return: the value of the regularizer function applied to X.
+        :rtype: float
         """
+        # Simply use mode_regularizer if it was given as a function.
         if isfunction(self._mode_regularizer):
             return self._mode_regularizer(X)
 
+        # Define the mode regularizer function using a preset.
+        _lambda = self._regularizer_params["lambda"]
+        _lambda_2 = self._regularizer_params["lambda_2"]
+
         if self._mode_regularizer == "l0":
-            return self._regularizer_params["lambda"] * L0_norm(X)
+            return _lambda * L0_norm(X)
 
         if self._mode_regularizer == "l1":
-            return self._regularizer_params["lambda"] * L1_norm(X)
+            return _lambda * L1_norm(X)
 
         if self._mode_regularizer == "l2":
-            return self._regularizer_params["lambda"] * L2_norm(X)
+            return _lambda * L2_norm(X)
 
         if self._mode_regularizer == "l02":
-            return self._regularizer_params["lambda"] * L0_norm(
-                X
-            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
+            return _lambda * L0_norm(X) + _lambda_2 * L2_norm_squared(X)
 
         if self._mode_regularizer == "l12":
-            return self._regularizer_params["lambda"] * L1_norm(
-                X
-            ) + self._regularizer_params["lambda_2"] * L2_norm_squared(X)
+            return _lambda * L1_norm(X) + _lambda_2 * L2_norm_squared(X)
 
-        raise ValueError("Invalid mode_regularizer provided.")
+    def mode_prox(self, X: np.ndarray, t: float):
+        """
+        Apply the proximal operator function to the matrix X with scaling t.
 
-    def mode_prox(self, X, t):
+        :param X: (n, m) numpy array.
+        :type X: numpy.ndarray
+        :param t: proximal operator scaling.
+        :type t: float
+        :return: (n, m) numpy array of thresholded values.
+        :rtype: numpy.ndarray
         """
-        Apply the proximal operator to the matrix X with scaling t.
-        """
+        # Simply use mode_prox if it was given as a function.
         if isfunction(self._mode_prox):
             return self._mode_prox(X, t)
 
+        # Define the proximal operator function using a preset.
+        _lambda = self._regularizer_params["lambda"]
+        _lambda_2 = self._regularizer_params["lambda_2"]
+
         if self._mode_regularizer == "l0":
-            return hard_threshold(X, self._regularizer_params["lambda"] * t)
+            return hard_threshold(X, _lambda * t)
 
         if self._mode_regularizer == "l1":
-            return soft_threshold(X, self._regularizer_params["lambda"] * t)
+            return soft_threshold(X, _lambda * t)
 
         if self._mode_regularizer == "l2":
-            return group_lasso(X, self._regularizer_params["lambda"] * t)
+            return group_lasso(X, _lambda * t)
 
         if self._mode_regularizer == "l02":
-            return scaled_hard_threshold(
-                X,
-                t,
-                self._regularizer_params["lambda"],
-                self._regularizer_params["lambda_2"],
-            )
+            return scaled_hard_threshold(X, t, _lambda, _lambda_2)
 
         if self._mode_regularizer == "l12":
-            return scaled_soft_threshold(
-                X,
-                t,
-                self._regularizer_params["lambda"],
-                self._regularizer_params["lambda_2"],
-            )
-
-        raise ValueError("Invalid mode_regularizer provided.")
+            return scaled_soft_threshold(X, t, _lambda, _lambda_2)
 
     @property
     def mask(self):
         """
-        Get the mask used to cover features.
+        Get the mask used to cover inactive features. Inactive features are
+        denoted with 1.0 and active features are denoted with 0.0.
+
+        :return: the mask used to cover inactive features.
+        :rtype: numpy.ndarray
         """
         M = np.ones(self.snapshots.shape[0])
         M[self.operator.unmasked_features] = 0.0
@@ -584,7 +621,7 @@ class SparseBOPDMD(BOPDMD):
 
     def fit(self, X, t):
         """
-        Compute the Optimized Dynamic Mode Decomposition with regularization.
+        Compute the Optimized Dynamic Mode Decomposition with sparse modes.
 
         :param X: the input snapshots.
         :type X: numpy.ndarray or iterable
@@ -593,7 +630,7 @@ class SparseBOPDMD(BOPDMD):
         """
         # Process the input data and convert to numpy.ndarrays.
         self._reset()
-        X = X.astype(complex)
+        X = X.astype(complex)  # use complex data types
         self._snapshots_holder = Snapshots(X)
         self._time = np.array(t).squeeze()
 
@@ -604,11 +641,10 @@ class SparseBOPDMD(BOPDMD):
         # Check that the number of snapshots in the data matrix X matches the
         # number of time points in the time vector t.
         if self.snapshots.shape[1] != len(self._time):
-            msg = (
+            raise ValueError(
                 "The number of columns in the data matrix X must match "
                 "the number of time points in the time vector t."
             )
-            raise ValueError(msg)
 
         # Compute the rank of the fit.
         self._svd_rank = int(compute_rank(self.snapshots, self._svd_rank))
@@ -637,8 +673,9 @@ class SparseBOPDMD(BOPDMD):
             msg = "init_alpha must be a 1D np.ndarray with {} entries."
             raise ValueError(msg.format(self._svd_rank))
 
-        # Build the operator now that the initial alpha has been defined.
-        self._Atilde = sBOPDMDOperator(
+        # Build the Sparse-Mode BOP-DMD operator now that the initial alpha and
+        # the projection basis have been defined.
+        self._Atilde = SparseBOPDMDOperator(
             self.mode_regularizer,
             self._compute_A,
             self._use_proj,
@@ -646,7 +683,6 @@ class SparseBOPDMD(BOPDMD):
             self._init_alpha,
             self._init_B,
             self._proj_basis,
-            self._unmasked_features,
             self._sampling_ratio,
             self._num_trials,
             self._trial_size,
