@@ -578,11 +578,13 @@ class BOPDMDOperator(DMDOperator):
                     # Unproject the modes first.
                     B = B.dot(self._proj_basis.T)
 
-                # Apply thresholding.
+                # Apply thresholding to the modes.
                 B = self._mode_prox(B)
 
-                # Apply sequential thresholding.
+                # Apply sequential thresholding, if requested.
                 for _ in range(self._threshold_iters):
+                    # Build the next B matrix by regressing again, but
+                    # only on the features that are sufficiently large.
                     for j in range(IS):
                         big_inds = B[:, j] != 0.0
                         B[big_inds, j] = np.linalg.lstsq(
@@ -590,6 +592,8 @@ class BOPDMDOperator(DMDOperator):
                             H[:, j],
                             rcond=None,
                         )[0]
+                    # Apply thresholding to the modes once more.
+                    B = self._mode_prox(B)
 
                 if self._use_proj:
                     # Project the modes back.
