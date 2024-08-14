@@ -156,8 +156,8 @@ class BOPDMDOperator(DMDOperator):
         eps_stall=1e-12,
         use_fulljac=True,
         verbose=False,
-        seq_thres_iter=1,
-        seq_thres_tol=None,
+        threshold_iters=1,
+        threshold_tol=None,
     ):
         self._compute_A = compute_A
         self._use_proj = use_proj
@@ -183,8 +183,8 @@ class BOPDMDOperator(DMDOperator):
             verbose,
         ]
         self._varpro_opts_warn()
-        self._seq_thres_iter = seq_thres_iter
-        self._seq_thres_tol = seq_thres_tol
+        self._threshold_iters = threshold_iters
+        self._threshold_tol = threshold_tol
 
         self._modes = None
         self._eigenvalues = None
@@ -584,10 +584,10 @@ class BOPDMDOperator(DMDOperator):
                 B = self._mode_prox(B)
 
                 # Apply sequential thresholding, if requested.
-                if self._seq_thres_tol is None:
+                if self._threshold_tol is None:
                     # If no convergence tolerance is given,
                     # perform some number of requested iterations.
-                    for _ in range(self._seq_thres_iter):
+                    for _ in range(self._threshold_iters):
                         # Build the next B matrix by regressing again, but
                         # only on the features that are sufficiently large.
                         for j in range(IS):
@@ -604,7 +604,7 @@ class BOPDMDOperator(DMDOperator):
                     # perform at most 10 iterations until B converges.
                     error = np.inf
                     count = 0
-                    while error > self._seq_thres_tol and count < 10:
+                    while error > self._threshold_tol and count < 10:
                         B_new = B.copy()
                         for j in range(IS):
                             big_inds = B[:, j] != 0.0
