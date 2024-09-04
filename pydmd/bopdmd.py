@@ -24,6 +24,7 @@ from .dmdbase import DMDBase
 from .dmdoperator import DMDOperator
 from .snapshots import Snapshots
 from .utils import compute_rank, compute_svd
+from .sbopdmd_utils import stlsq, split_B
 
 
 class BOPDMDOperator(DMDOperator):
@@ -156,8 +157,7 @@ class BOPDMDOperator(DMDOperator):
         eps_stall=1e-12,
         use_fulljac=True,
         verbose=False,
-        threshold_iters=1,
-        threshold_tol=None,
+        stlsq_opts=None,
     ):
         self._compute_A = compute_A
         self._use_proj = use_proj
@@ -183,8 +183,7 @@ class BOPDMDOperator(DMDOperator):
             verbose,
         ]
         self._varpro_opts_warn()
-        self._threshold_iters = threshold_iters
-        self._threshold_tol = threshold_tol
+        self._stlsq_opts = stlsq_opts
 
         self._modes = None
         self._eigenvalues = None
@@ -539,6 +538,12 @@ class BOPDMDOperator(DMDOperator):
         Computational Optimization and Applications 54.3 (2013): 579-593
         by Dianne P. O'Leary and Bert W. Rust.
         """
+        if self._use_proj:
+            # Set H to be the projected data, but save the full data.
+            # Otherwise, H simply denotes the full data.
+            H_full = H.copy()
+            H = H.dot(self._proj_basis.conj())
+
         # Define M, IS, and IA.
         M, IS = H.shape
         IA = len(init_alpha)
@@ -570,64 +575,52 @@ class BOPDMDOperator(DMDOperator):
         def compute_B(alpha):
             """
             Update B for the current alpha.
+
+            The first matrix returned will either be the reduced modes or
+            the full-state modes depending on the matrix H. The second matrix
+            returned will be the full-state modes when using mode_prox.
             """
-            # Compute B using least squares.
-            B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+            # CASE 1: Regular BOP-DMD
+            if self._mode_prox is None:
+                # Compute B using least-squares.
+                B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
+                # Don't bother computing the full-state modes for now.
+                return B, B
 
-            # Apply proximal operator if given.
-            if self._mode_prox is not None:
-                if self._use_proj:
-                    # Unproject the modes first.
-                    B = B.dot(self._proj_basis.T)
+            # CASE 2: BOP-DMD with mode thresholding.
+            if self._use_proj:
+                full_data = H_full
+            else:
+                full_data = H
 
-                # Apply thresholding to the modes.
-                B = self._mode_prox(B)
+            # Initialize the full-state modes using least-squares.
+            B_full = np.linalg.lstsq(Phi(alpha, t), full_data, rcond=None)[0]
 
-                # Apply sequential thresholding, if requested.
-                if self._threshold_tol is None:
-                    # If no convergence tolerance is given,
-                    # perform some number of requested iterations.
-                    for _ in range(self._threshold_iters):
-                        # Build the next B matrix by regressing again, but
-                        # only on the features that are sufficiently large.
-                        for j in range(IS):
-                            big_inds = B[:, j] != 0.0
-                            B[big_inds, j] = np.linalg.lstsq(
-                                Phi(alpha, t)[:, big_inds],
-                                H[:, j],
-                                rcond=None,
-                            )[0]
-                        # Apply thresholding again.
-                        B = self._mode_prox(B)
-                else:
-                    # If some convergence tolerance is given,
-                    # perform at most 10 iterations until B converges.
-                    error = np.inf
-                    count = 0
-                    while error > self._threshold_tol and count < 10:
-                        B_new = B.copy()
-                        for j in range(IS):
-                            big_inds = B[:, j] != 0.0
-                            B_new[big_inds, j] = np.linalg.lstsq(
-                                Phi(alpha, t)[:, big_inds],
-                                H[:, j],
-                                rcond=None,
-                            )[0]
-                        B_new = self._mode_prox(B_new)
-                        error = np.linalg.norm(B - B_new)
-                        np.copyto(B, B_new)
-                        count += 1
+            # Apply thresholding to the modes.
+            if self._stlsq_opts is None:
+                # Only apply the proximal operator once.
+                B_full = self._mode_prox(B_full)
+            else:
+                # Apply sequential thresholding to the modes.
+                B_full = stlsq(
+                    A=Phi(alpha, t),
+                    B=full_data,
+                    X0=B_full,
+                    prox_func=self._mode_prox,
+                    **self._stlsq_opts,
+                )
 
-                if self._use_proj:
-                    # Project the modes back.
-                    B = B.dot(self._proj_basis.conj())
+            # Project the modes back down if requested.
+            if self._use_proj:
+                B = B_full.dot(self._proj_basis.conj())
+                return B, B_full
 
-            return B
+            return B_full, B_full
 
         # Initialize values.
         _lambda = init_lambda
         alpha = self._push_eigenvalues(init_alpha)
-        B = compute_B(alpha)
+        B, B_full = compute_B(alpha)
         U, S, Vh = self._compute_irank_svd(Phi(alpha, t), tolrank)
 
         # Initialize termination flags.
@@ -699,7 +692,7 @@ class BOPDMDOperator(DMDOperator):
 
             # Take a step using our initial step size init_lambda.
             delta_0, alpha_0 = step(_lambda)
-            B_0 = compute_B(alpha_0)
+            B_0, B_full_0 = compute_B(alpha_0)
             residual_0, objective_0, error_0 = compute_error(B_0, alpha_0)
 
             # Check actual improvement vs predicted improvement.
@@ -715,14 +708,14 @@ class BOPDMDOperator(DMDOperator):
             if error_0 < error:
                 # Rescale lambda based on the improvement ratio.
                 _lambda *= max(1 / 3, 1 - (2 * improvement_ratio - 1) ** 3)
-                alpha, B = alpha_0, B_0
+                alpha, B, B_full = alpha_0, B_0, B_full_0
                 residual, objective, error = residual_0, objective_0, error_0
             else:
                 # Increase lambda until something works.
                 for _ in range(maxlam):
                     _lambda *= lamup
                     delta_0, alpha_0 = step(_lambda)
-                    B_0 = compute_B(alpha_0)
+                    B_0, B_full_0 = compute_B(alpha_0)
                     residual_0, objective_0, error_0 = compute_error(
                         B_0, alpha_0
                     )
@@ -739,10 +732,11 @@ class BOPDMDOperator(DMDOperator):
                             "Consider increasing maxlam or lamup."
                         )
                         print(msg.format(itr + 1, error))
-                    return B, alpha, converged
+
+                    return B_full, alpha, converged
 
                 # ...otherwise, update and proceed.
-                alpha, B = alpha_0, B_0
+                alpha, B, B_full = alpha_0, B_0, B_full_0
                 residual, objective, error = residual_0, objective_0, error_0
 
             # Update SVD information.
@@ -766,7 +760,7 @@ class BOPDMDOperator(DMDOperator):
             if converged:
                 if verbose:
                     print("Convergence reached!")
-                return B, alpha, converged
+                return B_full, alpha, converged
 
             if stalled:
                 if verbose:
@@ -777,7 +771,7 @@ class BOPDMDOperator(DMDOperator):
                         "increasing tol or decreasing eps_stall."
                     )
                     print(msg.format(eps_stall, itr + 1, error))
-                return B, alpha, converged
+                return B_full, alpha, converged
 
         # Failed to meet tolerance in maxiter steps.
         if verbose:
@@ -787,7 +781,7 @@ class BOPDMDOperator(DMDOperator):
             )
             print(msg.format(maxiter, error))
 
-        return B, alpha, converged
+        return B_full, alpha, converged
 
     def _single_trial_compute_operator(self, H, t, init_alpha):
         """
@@ -799,31 +793,19 @@ class BOPDMDOperator(DMDOperator):
         B, alpha, converged = self._variable_projection(
             H, t, init_alpha, self._exp_function, self._exp_function_deriv
         )
-        # Save the modes, eigenvalues, and amplitudes respectively.
-        w = B.T
-        e = alpha
-        b = np.sqrt(np.sum(np.abs(w) ** 2, axis=0))
 
-        # Normalize the modes and the amplitudes.
-        inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
-        b[inds_small] = 1.0
-        w = w.dot(np.diag(1 / b))
-        w[:, inds_small] = 0.0
-        b[inds_small] = 0.0
+        # Unproject the modes -- this is only needed when not using mode_prox.
+        if self._use_proj and self._mode_prox is None:
+            B = B.dot(self._proj_basis.T)
+
+        # Save the modes, eigenvalues, and amplitudes.
+        B, b = split_B(B)
+        e = alpha
+        w = B.T
 
         # Compute the projected propagator Atilde.
-        if self._use_proj:
-            Atilde = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
-            # Unproject the dmd modes.
-            w = self._proj_basis.dot(w)
-            # Apply mode proximal operator if given.
-            if self._mode_prox is not None:
-                w = self._mode_prox(w)
-        else:
-            w_proj = self._proj_basis.conj().T.dot(w)
-            Atilde = np.linalg.multi_dot(
-                [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
-            )
+        w_p = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot([w_p, np.diag(e), np.linalg.pinv(w_p)])
 
         # Compute the full system matrix A.
         if self._compute_A:
@@ -1502,14 +1484,8 @@ class BOPDMD(DMDBase):
             **self._varpro_opts_dict,
         )
 
-        # Define the snapshots that will be used for fitting.
-        if self._use_proj:
-            snp = self._proj_basis.conj().T.dot(self.snapshots)
-        else:
-            snp = self.snapshots
-
         # Fit the data.
-        self._b = self.operator.compute_operator(snp.T, self._time)
+        self._b = self.operator.compute_operator(self.snapshots.T, self._time)
 
         return self
 
