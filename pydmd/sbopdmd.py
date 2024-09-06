@@ -466,7 +466,7 @@ class SparseBOPDMD(BOPDMD):
 
     def __init__(
         self,
-        mode_regularizer: Union[str, Callable] = None,
+        mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
         svd_rank: Number = 0,
         compute_A: bool = False,
