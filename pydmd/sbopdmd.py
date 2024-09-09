@@ -27,7 +27,6 @@ from .sbopdmd_utils import (
     scaled_soft_threshold,
     accelerated_prox_grad,
     get_nonzero_cols,
-    split_B,
 )
 
 
@@ -45,7 +44,6 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         init_alpha,
         init_B,
         proj_basis,
-        sampling_ratio,
         num_trials,
         trial_size,
         eig_sort,
@@ -61,7 +59,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         tol=1e-6,
         eps_stall=1e-12,
         verbose=False,
-        sampling_rng=None,
+        feature_tol=0.0,
         prox_grad_tol=1e-6,
         prox_grad_maxiter=1000,
         prox_grad_restart=True,
@@ -94,18 +92,12 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self._use_mask = use_mask
         self._unmasked_features = None
 
-        # Parameters for random feature sampling.
-        self._sampling_ratio = sampling_ratio
-        if sampling_rng is None:
-            self._sampling_rng = np.random.default_rng()
-        else:
-            self._sampling_rng = sampling_rng
-
         # General variable projection parameters.
         self._maxiter = maxiter
         self._tol = tol
         self._eps_stall = eps_stall
         self._verbose = verbose
+        self._feature_tol = feature_tol
 
         # Set the parameters of Levenberg-Marquardt.
         self._lev_marq_params = {}
@@ -127,6 +119,8 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         :return: the indices of the active features.
         :rtype: numpy.ndarray
         """
+        if self._unmasked_features is None:
+            raise ValueError("You need to call fit() before.")
         return self._unmasked_features
 
     def _compute_B(self, B0, alpha, H, t, Phi):
@@ -291,34 +285,27 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         all_err = np.empty(self._maxiter)
 
         # Initialize termination flags.
+        unconverged_features = np.ones(N, dtype=bool)
         converged = False
         stalled = False
 
         for itr in range(self._maxiter):
-            # Obtain a sample of the feature indices for speed-up.
+            # Obtain the indices of the unmasked features.
             if self._use_mask:
-                valid_feature_inds = get_nonzero_cols(B)
-                self._unmasked_features = valid_feature_inds
+                self._unmasked_features = np.zeros(N, dtype=bool)
+                self._unmasked_features[get_nonzero_cols(B)] = True
             else:
-                valid_feature_inds = np.arange(N)
+                self._unmasked_features = np.ones(N, dtype=bool)
 
-            # Number of features that will be updated this iteration.
-            sample_size = min(
-                len(valid_feature_inds),
-                int(N * self._sampling_ratio),
-            )
-
-            # Indices of the features that will be updated this iteration.
-            sampled_inds = self._sampling_rng.choice(
-                valid_feature_inds,
-                size=sample_size,
-                replace=False,
+            # Obtain the indices of the features to update.
+            update_features = np.logical_and(
+                self._unmasked_features, unconverged_features
             )
 
             # Get the new optimal matrix B.
             B_new = np.copy(B)
-            B_new[:, sampled_inds] = self._compute_B(
-                B[:, sampled_inds], alpha, H[:, sampled_inds], t, Phi
+            B_new[:, update_features] = self._compute_B(
+                B[:, update_features], alpha, H[:, update_features], t, Phi
             )
 
             # Take a Levenberg-Marquardt step to update alpha.
@@ -337,6 +324,11 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             err_B = np.linalg.norm(B - B_new)
             all_obj[itr] = get_objective(B_new, alpha_new)
             all_err[itr] = err_alpha + err_B
+
+            # Get feature indices at which very little change occured.
+            unconverged_features = (
+                np.linalg.norm(B - B_new, axis=0) ** 2 > self._feature_tol
+            )
 
             # Update information.
             np.copyto(alpha, alpha_new)
@@ -386,35 +378,6 @@ class SparseBOPDMDOperator(BOPDMDOperator):
 
         return B, alpha, converged
 
-    def _single_trial_compute_operator(self, H, t, init_alpha):
-        """
-        Helper function that computes the standard optimized dmd operator.
-        Returns the resulting DMD modes, eigenvalues, amplitudes, reduced
-        system matrix, full system matrix, and whether or not convergence
-        of the variable projection routine was reached.
-        """
-        B, alpha, converged = self._variable_projection(
-            H, t, init_alpha, self._exp_function, self._exp_function_deriv
-        )
-        # Save the modes, eigenvalues, and amplitudes respectively.
-        B, b = split_B(B)
-        w = B.T
-        e = alpha
-
-        # Compute the projected propagator Atilde.
-        w_proj = self._proj_basis.conj().T.dot(w)
-        Atilde = np.linalg.multi_dot(
-            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
-        )
-
-        # Compute the full system matrix A.
-        if self._compute_A:
-            A = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
-        else:
-            A = None
-
-        return w, e, b, Atilde, A, converged
-
 
 class SparseBOPDMD(BOPDMD):
     """
@@ -449,14 +412,6 @@ class SparseBOPDMD(BOPDMD):
     :param init_B: Initial guess for the amplitude-scaled DMD modes.
         Defaults to using the relationship H = Phi(init_alpha)init_B.
     :type init_B: numpy.ndarray
-    :param sampling_ratio: Size of the subset of mode features to update at
-        each iteration of variable projection. Must be a value within the range
-        (0.0, 1.0], in which case int(sampling_ratio * n) random features will
-        be updated per iteration, where n denotes the total number of features.
-        If `use_mask=True` and the number of unmasked features becomes smaller
-        than int(sampling_ratio * n), then all of the unmasked features will be
-        updated at each iteration. Defaults to 1.0.
-    :type sampling_ratio: float
     :param mode_prox: Proximal operator associated with the `mode_regularizer`
         function, which takes matrix input X and a constant float. Note that
         this parameter must be provided if `mode_regularizer` is given as a
@@ -471,11 +426,10 @@ class SparseBOPDMD(BOPDMD):
         svd_rank: Number = 0,
         compute_A: bool = False,
         use_proj: bool = True,
-        use_mask: bool = True,
+        use_mask: bool = False,
         init_alpha: np.ndarray = None,
         init_B: np.ndarray = None,
         proj_basis: np.ndarray = None,
-        sampling_ratio: float = 1.0,
         num_trials: int = 0,
         trial_size: Number = 0.8,
         eig_sort: str = "auto",
@@ -506,7 +460,6 @@ class SparseBOPDMD(BOPDMD):
         self._regularizer_params = regularizer_params
         self._use_mask = use_mask
         self._init_B = init_B
-        self._sampling_ratio = sampling_ratio
 
         # Ensure the validity of the given mode regularizer.
         supported_regularizers = ("l0", "l1", "l2", "l02", "l12")
@@ -613,11 +566,9 @@ class SparseBOPDMD(BOPDMD):
         :return: the mask used to cover inactive features.
         :rtype: numpy.ndarray
         """
-        M = np.ones(self.snapshots.shape[0])
-        M[self.operator.unmasked_features] = 0.0
-        M = M.reshape(self.snapshots_shape)
-
-        return M
+        if self.operator is None:
+            raise ValueError("You need to call fit() before.")
+        return ~self.operator.unmasked_features
 
     def fit(self, X, t):
         """
@@ -683,7 +634,6 @@ class SparseBOPDMD(BOPDMD):
             self._init_alpha,
             self._init_B,
             self._proj_basis,
-            self._sampling_ratio,
             self._num_trials,
             self._trial_size,
             self._eig_sort,

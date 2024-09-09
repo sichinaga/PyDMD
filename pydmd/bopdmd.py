@@ -793,8 +793,8 @@ class BOPDMDOperator(DMDOperator):
         B, alpha, converged = self._variable_projection(
             H, t, init_alpha, self._exp_function, self._exp_function_deriv
         )
-
-        # Unproject the modes -- this is only needed when not using mode_prox.
+        # Unproject the modes.
+        # This is only needed when not using mode_prox.
         if self._use_proj and self._mode_prox is None:
             B = B.dot(self._proj_basis.T)
 
@@ -804,8 +804,10 @@ class BOPDMDOperator(DMDOperator):
         w = B.T
 
         # Compute the projected propagator Atilde.
-        w_p = self._proj_basis.conj().T.dot(w)
-        Atilde = np.linalg.multi_dot([w_p, np.diag(e), np.linalg.pinv(w_p)])
+        w_proj = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot(
+            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
+        )
 
         # Compute the full system matrix A.
         if self._compute_A:

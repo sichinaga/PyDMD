@@ -168,8 +168,8 @@ def test_custom_regularizer():
     def custom_regularizer(Y):
         return 5.0 * L0_norm(Y)
 
-    def custom_prox(Z):
-        return hard_threshold(Z, gamma=5.0)
+    def custom_prox(Z, c):
+        return hard_threshold(Z, gamma=5.0 * c)
 
     # Test that an error occurs if both functions aren't provided.
     with raises(ValueError):
@@ -419,7 +419,7 @@ def test_use_proj_1():
 def test_use_proj_2():
     """
     Test that using data projection actually reduces fitting time.
-    Test using the large toy data set.
+    Test using the large toy data set -- use any parameters.
     """
     # (1) Test for the prox-gradient model.
     t1 = time.time()
@@ -513,25 +513,36 @@ def test_use_mask_1():
     Test that the pixel mask expectedly masks the correct pixels.
     Test using the step function mode.
     """
+    # (1) Test correctness of the pixel masking option.
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        use_mask=True,
+    )
+    s_optdmd.fit(X2, t)
+    assert np.sum(s_optdmd.mask) == 45.0
+    np.testing.assert_array_equal(s_optdmd.mask[15:20], np.zeros(5))
+
+    # (2) Test correctness of the NO pixel masking option.
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
         regularizer_params={"lambda": 1.0},
     )
     s_optdmd.fit(X2, t)
-    assert np.sum(s_optdmd.mask) == 45.0
-    np.testing.assert_array_equal(s_optdmd.mask[15:20], np.zeros(5))
+    np.testing.assert_array_equal(s_optdmd.mask, np.zeros(50))
 
 
 def test_use_mask_2():
     """
-    Test that fitting without pixel masking produces accurate models.
+    Test that fitting with pixel masking produces accurate models.
     """
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
         regularizer_params={"lambda": 1.0},
-        use_mask=False,
+        use_mask=True,
     )
     s_optdmd.fit(X, t)
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
@@ -541,13 +552,14 @@ def test_use_mask_2():
 def test_use_mask_3():
     """
     Test that using pixel masking actually reduces fitting time.
-    Test using the large toy data set.
+    Test using the large toy data set -- results must be sparse.
     """
     t1 = time.time()
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
         regularizer_params={"lambda": 2.0},
+        use_mask=True,
     )
     s_optdmd.fit(X_big, t)
     t2 = time.time()
@@ -555,7 +567,6 @@ def test_use_mask_3():
         svd_rank=2,
         mode_regularizer="l0",
         regularizer_params={"lambda": 2.0},
-        use_mask=False,
     )
     s_optdmd.fit(X_big, t)
     t3 = time.time()
@@ -574,6 +585,7 @@ def test_use_mask_4():
             svd_rank=2,
             mode_regularizer="l0",
             regularizer_params={"lambda": _lambda},
+            use_mask=True,
         )
         s_optdmd_mask.fit(X, t)
 
@@ -582,7 +594,6 @@ def test_use_mask_4():
             svd_rank=2,
             mode_regularizer="l0",
             regularizer_params={"lambda": _lambda},
-            use_mask=False,
         )
         s_optdmd_nomask.fit(X, t)
 
@@ -593,3 +604,40 @@ def test_use_mask_4():
             sort_imag(s_optdmd_nomask.eigs),
             rtol=1e-6,
         )
+
+
+def test_use_mask_5():
+    """
+    Test that the proper errors are thrown if mask is requested before fitting.
+    """
+    s_optdmd = SparseBOPDMD(use_mask=True)
+    with raises(ValueError):
+        _ = s_optdmd.mask
+
+    s_optdmd = SparseBOPDMD()
+    with raises(ValueError):
+        _ = s_optdmd.mask
+
+
+def test_feature_tol():
+    """
+    Test that adjusting the feature tolerance actually reduces fitting time.
+    Test using the large toy data set -- results must be dense.
+    """
+    t1 = time.time()
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.1},
+        varpro_opts_dict={"feature_tol": 1e-3},
+    )
+    s_optdmd.fit(X_big, t)
+    t2 = time.time()
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.1},
+    )
+    s_optdmd.fit(X_big, t)
+    t3 = time.time()
+    assert t2 - t1 < t3 - t2
