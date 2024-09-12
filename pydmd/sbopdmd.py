@@ -185,7 +185,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         M, IS = H.shape
         IA = len(alpha_0)
 
-        # Compute the SVD of Phi(alpha) if using OptDMD approximation.
+        # Compute the SVD of Phi(alpha, t) if using OptDMD approximation.
         if use_optdmd_eigs:
             U = self._compute_irank_svd(
                 Phi(alpha_0, t),

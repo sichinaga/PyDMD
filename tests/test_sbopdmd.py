@@ -720,3 +720,19 @@ def test_use_optdmd_eigs():
     s_optdmd.fit(X, t)
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+
+
+def test_eig_constraints():
+    """
+    Test eigenvalue constraint functionality and correctness.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        eig_constraints={"imag"},
+    )
+    s_optdmd.fit(X, t)
+    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+    assert np.all(s_optdmd.eigs.real == 0.0)
