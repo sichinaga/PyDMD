@@ -10,6 +10,7 @@ from inspect import isfunction
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import qr
+from scipy.sparse import csr_matrix
 
 from .bopdmd import BOPDMD, BOPDMDOperator
 from .snapshots import Snapshots
@@ -26,7 +27,7 @@ from .sbopdmd_utils import (
     scaled_hard_threshold,
     scaled_soft_threshold,
     accelerated_prox_grad,
-    get_nonzero_cols,
+    get_zero_cols,
 )
 
 
@@ -63,6 +64,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         prox_grad_tol=1e-6,
         prox_grad_maxiter=1000,
         prox_grad_restart=True,
+        use_optdmd_eigs=False,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -104,6 +106,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self._lev_marq_params["init_lambda"] = init_lambda
         self._lev_marq_params["maxlam"] = maxlam
         self._lev_marq_params["lamup"] = lamup
+        self._lev_marq_params["use_optdmd_eigs"] = use_optdmd_eigs
 
         # Set the parameters of accelerated prox-gradient descent.
         self._prox_grad_params = {}
@@ -163,7 +166,17 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         return B_updated
 
     def _compute_alpha_levmarq(
-        self, B, alpha_0, H, t, Phi, dPhi, init_lambda, maxlam, lamup
+        self,
+        B,
+        alpha_0,
+        H,
+        t,
+        Phi,
+        dPhi,
+        init_lambda,
+        maxlam,
+        lamup,
+        use_optdmd_eigs,
     ):
         """
         Use Levenberg-Marquardt to step alpha for the current B.
@@ -171,6 +184,13 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         # Define M, IS, and IA.
         M, IS = H.shape
         IA = len(alpha_0)
+
+        # Compute the SVD of Phi(alpha) if using OptDMD approximation.
+        if use_optdmd_eigs:
+            U = self._compute_irank_svd(
+                Phi(alpha_0, t),
+                tolrank=M * np.finfo(float).eps,
+            )[0]
 
         # Initialize storage for Jacobian computations.
         djac_matrix = np.zeros((M * IS, IA), dtype="complex")
@@ -185,7 +205,14 @@ class SparseBOPDMDOperator(BOPDMDOperator):
 
         for i in range(IA):
             # Build the Jacobian matrix by looping over all alpha indices.
-            djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
+            if use_optdmd_eigs:
+                dphi_temp = dPhi(alpha_0, t, i)
+                uut_dphi = csr_matrix(U @ csr_matrix(U.conj().T @ dphi_temp))
+                djac_approx = (dphi_temp - uut_dphi) @ B
+                djac_matrix[:, i] = djac_approx.ravel(order="F")
+            else:
+                djac_matrix[:, i] = dPhi(alpha_0, t, i).dot(B).ravel(order="F")
+
             # Scale for the Levenberg-Marquardt algorithm.
             scales[i] = min(np.linalg.norm(djac_matrix[:, i]), 1)
             scales[i] = max(scales[i], 1e-6)
@@ -266,6 +293,9 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         # Record the original data set size (number of features).
         N = H.shape[1]
 
+        # Initialize feature masking -- every feature starts unmasked.
+        self._unmasked_features = np.ones(N, dtype=bool)
+
         # Set the projected data if requested.
         if self._use_proj:
             H_proj = H.dot(self._proj_basis.conj())
@@ -290,12 +320,12 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         stalled = False
 
         for itr in range(self._maxiter):
-            # Obtain the indices of the unmasked features.
+            # Update the indices of the unmasked features.
             if self._use_mask:
-                self._unmasked_features = np.zeros(N, dtype=bool)
-                self._unmasked_features[get_nonzero_cols(B)] = True
-            else:
-                self._unmasked_features = np.ones(N, dtype=bool)
+                B_unmasked = B[:, self._unmasked_features]
+                inds_unmasked = np.arange(N)[self._unmasked_features]
+                inds_add_mask = inds_unmasked[get_zero_cols(B_unmasked)]
+                self._unmasked_features[inds_add_mask] = False
 
             # Obtain the indices of the features to update.
             update_features = np.logical_and(

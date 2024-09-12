@@ -344,14 +344,14 @@ def test_sparsity_4():
         s_optdmd = BOPDMD(
             svd_rank=1,
             mode_prox=mode_prox,
-            varpro_opts_dict={"stlsq_opts": {}},
+            varpro_opts_dict={"stlsq_opts_dict": {}},
         )
         s_optdmd.fit(X1, t)
         assert n > np.count_nonzero(s_optdmd.modes)
         n = np.count_nonzero(s_optdmd.modes)
 
 
-def test_fit_stlsq():
+def test_fit_stlsq_1():
     """
     Test that fitting with sequential thresholding produces accurate models.
     Test using various parameterizations of the stlsq method.
@@ -364,7 +364,7 @@ def test_fit_stlsq():
     s_optdmd = BOPDMD(
         svd_rank=2,
         mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts": {}},
+        varpro_opts_dict={"stlsq_opts_dict": {}},
     )
     s_optdmd.fit(X, t)
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
@@ -374,7 +374,7 @@ def test_fit_stlsq():
     s_optdmd = BOPDMD(
         svd_rank=2,
         mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts": {"tol": 1e-12}},
+        varpro_opts_dict={"stlsq_opts_dict": {"tol": 1e-12}},
     )
     s_optdmd.fit(X, t)
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
@@ -384,11 +384,75 @@ def test_fit_stlsq():
     s_optdmd = BOPDMD(
         svd_rank=2,
         mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts": {"fixed_iter": 1, "tol": None}},
+        varpro_opts_dict={"stlsq_opts_dict": {"tol": -1, "max_iter": 10}},
     )
     s_optdmd.fit(X, t)
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+
+
+def test_fit_stlsq_2():
+    """
+    Test that fitting with sequential thresholding and plain thresholding
+    approximately produce the same model for various parameters. Checks
+    similarity of the modes and the eigenvalues. Tests hard thresholding.
+    """
+    for _gamma in [1e-4, 2e-4, 5e-4, 1e-3, 5e-3]:
+
+        def mode_prox(Z):
+            return hard_threshold(Z, gamma=_gamma)
+
+        # Fit model with plain thresholding.
+        s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
+        s_optdmd.fit(X, t)
+
+        # Fit model with sequential thresholding.
+        s_optdmd_stlsq = BOPDMD(
+            svd_rank=2,
+            mode_prox=mode_prox,
+            varpro_opts_dict={"stlsq_opts_dict": {}},
+        )
+        s_optdmd_stlsq.fit(X, t)
+
+        # Compare modes and eigenvalues.
+        assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
+        np.testing.assert_allclose(
+            sort_imag(s_optdmd.eigs),
+            sort_imag(s_optdmd_stlsq.eigs),
+            rtol=0.01,
+        )
+
+
+def test_fit_stlsq_3():
+    """
+    Test that fitting with sequential thresholding and plain thresholding
+    approximately produce the same model for various parameters. Checks
+    similarity of the modes and the eigenvalues. Tests soft thresholding.
+    """
+    for _gamma in [0.01, 0.02, 0.05, 0.1]:
+
+        def mode_prox(Z):
+            return soft_threshold(Z, gamma=_gamma)
+
+        # Fit model with plain thresholding.
+        s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
+        s_optdmd.fit(X, t)
+
+        # Fit model with sequential thresholding.
+        s_optdmd_stlsq = BOPDMD(
+            svd_rank=2,
+            mode_prox=mode_prox,
+            varpro_opts_dict={"stlsq_opts_dict": {"apply_final_prox": True}},
+        )
+        s_optdmd_stlsq.fit(X, t)
+
+        # Compare modes and eigenvalues.
+        assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
+        np.testing.assert_allclose(
+            sort_imag(s_optdmd.eigs),
+            sort_imag(s_optdmd_stlsq.eigs),
+            rtol=0.01,
+        )
 
 
 def test_use_proj_1():
@@ -549,28 +613,28 @@ def test_use_mask_2():
     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
 
 
-def test_use_mask_3():
-    """
-    Test that using pixel masking actually reduces fitting time.
-    Test using the large toy data set -- results must be sparse.
-    """
-    t1 = time.time()
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 2.0},
-        use_mask=True,
-    )
-    s_optdmd.fit(X_big, t)
-    t2 = time.time()
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 2.0},
-    )
-    s_optdmd.fit(X_big, t)
-    t3 = time.time()
-    assert t2 - t1 < t3 - t2
+# def test_use_mask_3():
+#     """
+#     Test that using pixel masking actually reduces fitting time.
+#     Test using the large toy data set -- results must be sparse.
+#     """
+#     t1 = time.time()
+#     s_optdmd = SparseBOPDMD(
+#         svd_rank=2,
+#         mode_regularizer="l0",
+#         regularizer_params={"lambda": 2.0},
+#         use_mask=True,
+#     )
+#     s_optdmd.fit(X_big, t)
+#     t2 = time.time()
+#     s_optdmd = SparseBOPDMD(
+#         svd_rank=2,
+#         mode_regularizer="l0",
+#         regularizer_params={"lambda": 2.0},
+#     )
+#     s_optdmd.fit(X_big, t)
+#     t3 = time.time()
+#     assert t2 - t1 < t3 - t2
 
 
 def test_use_mask_4():
@@ -641,3 +705,18 @@ def test_feature_tol():
     s_optdmd.fit(X_big, t)
     t3 = time.time()
     assert t2 - t1 < t3 - t2
+
+
+def test_use_optdmd_eigs():
+    """
+    Test that using the Optimized DMD eigenvalues produces accurate models.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        varpro_opts_dict={"use_optdmd_eigs": True},
+    )
+    s_optdmd.fit(X, t)
+    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1

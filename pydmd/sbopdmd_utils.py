@@ -132,25 +132,25 @@ def split_B(B: np.ndarray):
     return B_normalized, b
 
 
-def get_nonzero_cols(X: np.ndarray, tol=1e-16):
+def get_zero_cols(X: np.ndarray, tol=1e-16):
     """
-    Return the indices of the columns of X that are not the zero vector.
+    Return the indices of the columns of X that are the zero vector.
     """
     X = np.copy(X)
     X[np.abs(X) < tol] = 0.0
 
-    return np.nonzero(np.any(X, axis=0))[0]
+    return np.nonzero(~np.any(X, axis=0))[0]
 
 
 def stlsq(
     A: np.ndarray,
     B: np.ndarray,
     prox_func: Callable,
-    fixed_iter: int = 10,
-    tol: float = 1e-16,
+    tol: float = 1e-6,
     max_iter: int = 20,
     X0: np.ndarray = None,
     sparse_inds: np.ndarray = None,
+    apply_final_prox: bool = False,
 ):
     """
     Sequential thresholded least-squares for solving
@@ -163,10 +163,6 @@ def stlsq(
     :type B: np.ndarray
     :param prox_func: Function used to threshold the X matrix.
     :type prox_func: function
-    :param fixed_iter: Fixed number of sequential thresholding iterations to
-        perform. This number of iterations is performed if the convergence tol
-        is set to None.
-    :type fixed_iter: int
     :param tol: Convergence tolerance for the matrix X. If specified, stlsq
         will terminate either once the computed X matrix ceases to change
         between iterations according to the tolerance, or once the maximum
@@ -181,6 +177,9 @@ def stlsq(
     :param sparse_inds: Indices at which to threshold the solution matrix. All
         indices of the solution matrix are thresholded by default.
     :type sparse_inds: np.ndarray
+    :param apply_final_prox: Whether or not to apply the given prox function
+        one last time prior to returning the output matrix.
+    :type apply_final_prox: bool
     :return: Sparse (r, n) solution matrix X.
     :rtype: np.ndarray
     """
@@ -190,39 +189,33 @@ def stlsq(
     else:
         X = X0.copy()
 
-    # Get the dimensions of the output matrix X.
-    r, n = X.shape
-
     # Set the indices of X at which to threshold.
     if sparse_inds is None:
-        sparse_inds = np.ones((r, n), dtype=bool)
+        sparse_inds = np.ones(X.shape, dtype=bool)
 
-    if tol is None:
-        # No convergence tolerance given -- perform fixed number of iterations.
-        for _ in range(fixed_iter):
-            # Apply thresholding, but only at specified indices.
-            X[sparse_inds] = prox_func(X[sparse_inds])
-            # Regress again, but only on features that are sufficiently large.
-            for j in range(n):
-                big_inds = X[:, j] != 0.0
-                X[big_inds, j] = np.linalg.lstsq(
-                    A[:, big_inds], B[:, j], rcond=None
-                )[0]
-    else:
-        # Tolerance given -- perform at most max_iter iters until X converges.
-        error = np.inf
-        count = 0
-        while error > tol and count < max_iter:
-            X_new = X.copy()
-            X_new[sparse_inds] = prox_func(X_new[sparse_inds])
-            for j in range(n):
-                big_inds = X_new[:, j] != 0.0
-                X_new[big_inds, j] = np.linalg.lstsq(
-                    A[:, big_inds], B[:, j], rcond=None
-                )[0]
-            error = np.linalg.norm(X - X_new)
-            np.copyto(X, X_new)
-            count += 1
+    # Perform at most max_iter iterations until X converges.
+    error = np.inf
+    count = 0
+    while error > tol and count < max_iter:
+        # Apply thresholding, but only at specified indices.
+        X_new = X.copy()
+        X_new[sparse_inds] = prox_func(X_new[sparse_inds])
+
+        # Regress again, but only on features that are sufficiently large.
+        for j in range(X.shape[1]):
+            big_inds = X_new[:, j] != 0.0
+            X_new[big_inds, j] = np.linalg.lstsq(
+                A[:, big_inds], B[:, j], rcond=None
+            )[0]
+
+        # Get the change in X between iterations and update.
+        error = np.linalg.norm(X - X_new)
+        np.copyto(X, X_new)
+        count += 1
+
+    # Apply the prox function one last time if requested.
+    if apply_final_prox:
+        return prox_func(X)
 
     return X
 

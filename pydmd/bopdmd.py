@@ -132,6 +132,11 @@ class BOPDMDOperator(DMDOperator):
         or not to print information regarding the method's iterative progress.
         Default is False, don't print information.
     :type verbose: bool
+    :param stlsq_opts_dict: Dictionary containing the desired parameter values
+        for sequential thresholded least-squares. See `stlsq` documentation in
+        `sbopdmd_utils.py` for default values and descriptions for each
+        parameter.
+    :type stlsq_opts_dict: dict
     """
 
     def __init__(
@@ -157,7 +162,7 @@ class BOPDMDOperator(DMDOperator):
         eps_stall=1e-12,
         use_fulljac=True,
         verbose=False,
-        stlsq_opts=None,
+        stlsq_opts_dict=None,
     ):
         self._compute_A = compute_A
         self._use_proj = use_proj
@@ -183,7 +188,7 @@ class BOPDMDOperator(DMDOperator):
             verbose,
         ]
         self._varpro_opts_warn()
-        self._stlsq_opts = stlsq_opts
+        self._stlsq_opts_dict = stlsq_opts_dict
 
         self._modes = None
         self._eigenvalues = None
@@ -597,7 +602,7 @@ class BOPDMDOperator(DMDOperator):
             B_full = np.linalg.lstsq(Phi(alpha, t), full_data, rcond=None)[0]
 
             # Apply thresholding to the modes.
-            if self._stlsq_opts is None:
+            if self._stlsq_opts_dict is None:
                 # Only apply the proximal operator once.
                 B_full = self._mode_prox(B_full)
             else:
@@ -607,7 +612,7 @@ class BOPDMDOperator(DMDOperator):
                     B=full_data,
                     X0=B_full,
                     prox_func=self._mode_prox,
-                    **self._stlsq_opts,
+                    **self._stlsq_opts_dict,
                 )
 
             # Project the modes back down if requested.
