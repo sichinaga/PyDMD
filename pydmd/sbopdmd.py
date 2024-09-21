@@ -39,6 +39,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
     def __init__(
         self,
         mode_regularizer,
+        SR3_scale,
         compute_A,
         use_proj,
         use_mask,
@@ -88,6 +89,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             verbose=verbose,
         )
         self._mode_regularizer = mode_regularizer
+        self._SR3_scale = SR3_scale
         self._init_B = init_B
 
         # Information for pixel masking.
@@ -131,23 +133,68 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         Use accelerated prox-gradient to update B for the current alpha.
         """
         A = Phi(alpha, t)
-        beta_f = np.linalg.norm(A, 2) ** 2
 
-        def func_f(Z):
-            return 0.5 * np.linalg.norm(H - A.dot(Z), "fro") ** 2
+        if self._SR3_scale > 0.0:
+            # Apply Sparse Relaxed Regularized Regression (SR3).
+            k = self._SR3_scale
+            m, r = A.shape
+            # Compute the Hk matrix shorthand and its inverse.
+            Hk = A.conj().T.dot(A) + k * np.eye(r)
+            Hk_inv = np.linalg.inv(Hk)
+            # Compute the new SR3 linear operators.
+            Fk = np.vstack(
+                [
+                    k * A.dot(Hk_inv),
+                    np.sqrt(k) * (np.eye(r) - k * Hk_inv),
+                ]
+            )
+            Gk = np.vstack(
+                [
+                    np.eye(m) - np.linalg.multi_dot([A, Hk_inv, A.conj().T]),
+                    np.sqrt(k) * Hk_inv.dot(A.conj().T),
+                ]
+            )
 
-        def grad_f(Z):
-            return A.conj().T.dot(A.dot(Z) - H)
+            W0 = (1 / k) * (Hk.dot(B0) - A.conj().T.dot(H))
+            beta_f = np.linalg.norm(Fk, 2) ** 2
 
-        B_updated, obj_hist, err_hist = accelerated_prox_grad(
-            B0,
-            func_f,
-            self._mode_regularizer,
-            grad_f,
-            self._mode_prox,
-            beta_f,
-            **self._prox_grad_params,
-        )
+            def func_f(Z):
+                return 0.5 * np.linalg.norm(Gk.dot(H) - Fk.dot(Z), "fro") ** 2
+
+            def grad_f(Z):
+                return Fk.conj().T.dot(Fk.dot(Z) - Gk.dot(H))
+
+            W_updated, obj_hist, err_hist = accelerated_prox_grad(
+                W0,
+                func_f,
+                self._mode_regularizer,
+                grad_f,
+                self._mode_prox,
+                beta_f,
+                **self._prox_grad_params,
+            )
+
+            B_updated = Hk_inv.dot(A.conj().T.dot(H) + k * W_updated)
+
+        else:
+            # Apply prox-gradient directly to the B matrix.
+            beta_f = np.linalg.norm(A, 2) ** 2
+
+            def func_f(Z):
+                return 0.5 * np.linalg.norm(H - A.dot(Z), "fro") ** 2
+
+            def grad_f(Z):
+                return A.conj().T.dot(A.dot(Z) - H)
+
+            B_updated, obj_hist, err_hist = accelerated_prox_grad(
+                B0,
+                func_f,
+                self._mode_regularizer,
+                grad_f,
+                self._mode_prox,
+                beta_f,
+                **self._prox_grad_params,
+            )
 
         if self._verbose:
             print("Prox Gradient Results:")
@@ -433,6 +480,11 @@ class SparseBOPDMD(BOPDMD):
         - "lambda_2": Scaling for the second norm term (used by "l02", "l12").
             Defaults to 1e-6.
     :type regularizer_params: dict
+    :param SR3_scale: Relaxation parameter for the Sparse Relaxed Regularized
+        Regression (SR3) routine. Higher values lead to a smaller gap between
+        the computed modes and the auxiliary SR3 variable. If zero, proximal
+        gradient is applied directly to the modes and SR3 is not used.
+    :type SR3_scale: float
     :param use_mask: Flag that determines whether or not to ignore features
         that are deemed inactive during the variable projection routine. If
         `True`, features that are eliminated due to sparsity are ignored during
@@ -453,6 +505,7 @@ class SparseBOPDMD(BOPDMD):
         self,
         mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
+        SR3_scale: float = 0.0,
         svd_rank: Number = 0,
         compute_A: bool = False,
         use_proj: bool = True,
@@ -488,6 +541,7 @@ class SparseBOPDMD(BOPDMD):
         )
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
+        self._SR3_scale = SR3_scale
         self._use_mask = use_mask
         self._init_B = init_B
 
@@ -658,6 +712,7 @@ class SparseBOPDMD(BOPDMD):
         # the projection basis have been defined.
         self._Atilde = SparseBOPDMDOperator(
             self.mode_regularizer,
+            self._SR3_scale,
             self._compute_A,
             self._use_proj,
             self._use_mask,

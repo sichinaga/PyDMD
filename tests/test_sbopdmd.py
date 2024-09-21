@@ -736,3 +736,69 @@ def test_eig_constraints():
     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
     assert np.all(s_optdmd.eigs.real == 0.0)
+
+
+def test_SR3_1():
+    """
+    Test that using SR3 produces accurate models.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        SR3_scale=1e+4,
+    )
+    s_optdmd.fit(X, t)
+    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+
+
+def test_SR3_2():
+    """
+    Test that fitting with a small SR3_scale is like applying normal DMD, and
+    that fitting with a large SR3_scale is like applying normal sparse-mode
+    DMD. Checks similarity of the modes and the eigenvalues.
+    """
+    # Fit model with normal DMD.
+    optdmd = BOPDMD(svd_rank=2)
+    optdmd.fit(X, t)
+
+    # Fit model with normal sparse-mode DMD.
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+    )
+    s_optdmd.fit(X, t)
+
+    # SR3 with small scaling.
+    s_optdmd_SR3small = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        SR3_scale=1e-4,
+    )
+    s_optdmd_SR3small.fit(X, t)
+
+    # SR3 with big scaling.
+    s_optdmd_SR3big = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        SR3_scale=1e+4,
+    )
+    s_optdmd_SR3big.fit(X, t)
+
+    # Compare modes and eigenvalues.
+    assert relative_error(optdmd.modes, s_optdmd_SR3small.modes) < 0.05
+    np.testing.assert_allclose(
+        sort_imag(optdmd.eigs),
+        sort_imag(s_optdmd_SR3small.eigs),
+        rtol=0.01,
+    )
+    assert relative_error(s_optdmd.modes, s_optdmd_SR3big.modes) < 0.01
+    np.testing.assert_allclose(
+        sort_imag(s_optdmd.eigs),
+        sort_imag(s_optdmd_SR3big.eigs),
+        rtol=0.01,
+    )
