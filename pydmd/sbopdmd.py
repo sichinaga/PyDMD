@@ -51,6 +51,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         eig_sort,
         eig_constraints,
         mode_prox,
+        index_global,
         remove_bad_bags,
         bag_warning,
         bag_maxfail,
@@ -77,6 +78,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
+            index_global=index_global,
             remove_bad_bags=remove_bad_bags,
             bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
@@ -133,11 +135,16 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         Use accelerated prox-gradient to update B for the current alpha.
         """
         A = Phi(alpha, t)
+        m, r = A.shape
+
+        # Get the indices at which to apply sparsity.
+        index_local = np.ones(r, dtype=bool)
+        index_local[self._index_global] = False
+        # TODO: Do something with index_local.
 
         if self._SR3_scale > 0.0:
             # Apply Sparse Relaxed Regularized Regression (SR3).
             k = self._SR3_scale
-            m, r = A.shape
             # Compute the Hk matrix shorthand and its inverse.
             Hk = A.conj().T.dot(A) + k * np.eye(r)
             Hk_inv = np.linalg.inv(Hk)
@@ -480,6 +487,11 @@ class SparseBOPDMD(BOPDMD):
         - "lambda_2": Scaling for the second norm term (used by "l02", "l12").
             Defaults to 1e-6.
     :type regularizer_params: dict
+    :param index_global: DMD mode indices at which modes are assumed to be
+        global. Global modes are not sparsified when applying the Sparse-Mode
+        DMD pipeline via mode_prox, hence this parameter is not used if
+        mode_prox is not provided. By default, all modes are sparsified.
+    :type index_global: iterable
     :param SR3_scale: Relaxation parameter for the Sparse Relaxed Regularized
         Regression (SR3) routine. Higher values lead to a smaller gap between
         the computed modes and the auxiliary SR3 variable. If zero, proximal
@@ -505,6 +517,7 @@ class SparseBOPDMD(BOPDMD):
         self,
         mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
+        index_global: Union[list, tuple] = None,
         SR3_scale: float = 0.0,
         svd_rank: Number = 0,
         compute_A: bool = False,
@@ -534,6 +547,7 @@ class SparseBOPDMD(BOPDMD):
             eig_sort=eig_sort,
             eig_constraints=eig_constraints,
             mode_prox=mode_prox,
+            index_global=index_global,
             remove_bad_bags=remove_bad_bags,
             bag_warning=bag_warning,
             bag_maxfail=bag_maxfail,
@@ -724,6 +738,7 @@ class SparseBOPDMD(BOPDMD):
             self._eig_sort,
             self._eig_constraints,
             self.mode_prox,
+            self._index_global,
             self._remove_bad_bags,
             self._bag_warning,
             self._bag_maxfail,

@@ -80,6 +80,11 @@ class BOPDMDOperator(DMDOperator):
         routine after the modes have been projected back to the space of the
         full input data.
     :type mode_prox: function
+    :param index_global: DMD mode indices at which modes are assumed to be
+        global. Global modes are not sparsified when applying the Sparse-Mode
+        DMD pipeline via mode_prox, hence this parameter is not used if
+        mode_prox is not provided. By default, all modes are sparsified.
+    :type index_global: iterable
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept
@@ -150,6 +155,7 @@ class BOPDMDOperator(DMDOperator):
         eig_sort,
         eig_constraints,
         mode_prox,
+        index_global,
         remove_bad_bags,
         bag_warning,
         bag_maxfail,
@@ -173,6 +179,7 @@ class BOPDMDOperator(DMDOperator):
         self._eig_sort = eig_sort
         self._eig_constraints = eig_constraints
         self._mode_prox = mode_prox
+        self._index_global = index_global
         self._remove_bad_bags = remove_bad_bags
         self._bag_warning = bag_warning
         self._bag_maxfail = bag_maxfail
@@ -601,10 +608,14 @@ class BOPDMDOperator(DMDOperator):
             # Initialize the full-state modes using least-squares.
             B_full = np.linalg.lstsq(Phi(alpha, t), full_data, rcond=None)[0]
 
+            # Get the indices at which to apply sparsity.
+            index_local = np.ones(IA, dtype=bool)
+            index_local[self._index_global] = False
+
             # Apply thresholding to the modes.
             if self._stlsq_opts_dict is None:
                 # Only apply the proximal operator once.
-                B_full = self._mode_prox(B_full)
+                B_full[index_local] = self._mode_prox(B_full[index_local])
             else:
                 # Apply sequential thresholding to the modes.
                 B_full = stlsq(
@@ -612,6 +623,7 @@ class BOPDMDOperator(DMDOperator):
                     B=full_data,
                     X0=B_full,
                     prox_func=self._mode_prox,
+                    sparse_inds=index_local,
                     **self._stlsq_opts_dict,
                 )
 
@@ -1038,6 +1050,11 @@ class BOPDMD(DMDBase):
         routine after the modes have been projected back to the space of the
         full input data.
     :type mode_prox: function
+    :param index_global: DMD mode indices at which modes are assumed to be
+        global. Global modes are not sparsified when applying the Sparse-Mode
+        DMD pipeline via mode_prox, hence this parameter is not used if
+        mode_prox is not provided. By default, all modes are sparsified.
+    :type index_global: iterable
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept
@@ -1075,6 +1092,7 @@ class BOPDMD(DMDBase):
         eig_sort="auto",
         eig_constraints=None,
         mode_prox=None,
+        index_global=None,
         remove_bad_bags=False,
         bag_warning=100,
         bag_maxfail=200,
@@ -1116,6 +1134,10 @@ class BOPDMD(DMDBase):
         self._check_eig_constraints(eig_constraints)
         self._eig_constraints = eig_constraints
         self._mode_prox = mode_prox
+
+        if index_global is None:
+            index_global = []
+        self._index_global = index_global
 
         self._snapshots_holder = None
         self._time = None
@@ -1485,6 +1507,7 @@ class BOPDMD(DMDBase):
             self._eig_sort,
             self._eig_constraints,
             self._mode_prox,
+            self._index_global,
             self._remove_bad_bags,
             self._bag_warning,
             self._bag_maxfail,
