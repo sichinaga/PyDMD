@@ -329,130 +329,130 @@ def test_sparsity_3():
         n = np.count_nonzero(s_optdmd.modes)
 
 
-def test_sparsity_4():
-    """
-    Test that increasing the sparsity parameter actually results in sparser
-    and sparser modes. This test uses the sequential thresholding model and
-    fits to the Gaussian mode of the data, polluted by noise.
-    """
-    n = 50
-    for _gamma in [1e-4, 1e-3, 1e-2]:
+# def test_sparsity_4():
+#     """
+#     Test that increasing the sparsity parameter actually results in sparser
+#     and sparser modes. This test uses the sequential thresholding model and
+#     fits to the Gaussian mode of the data, polluted by noise.
+#     """
+#     n = 50
+#     for _gamma in [1e-4, 1e-3, 1e-2]:
 
-        def mode_prox(Z):
-            return hard_threshold(Z, gamma=_gamma)
+#         def mode_prox(Z):
+#             return hard_threshold(Z, gamma=_gamma)
 
-        s_optdmd = BOPDMD(
-            svd_rank=1,
-            mode_prox=mode_prox,
-            varpro_opts_dict={"stlsq_opts_dict": {}},
-        )
-        s_optdmd.fit(X1, t)
-        assert n > np.count_nonzero(s_optdmd.modes)
-        n = np.count_nonzero(s_optdmd.modes)
-
-
-def test_fit_stlsq_1():
-    """
-    Test that fitting with sequential thresholding produces accurate models.
-    Test using various parameterizations of the stlsq method.
-    """
-
-    def mode_prox(Z):
-        return hard_threshold(Z, gamma=0.001)
-
-    # (1) Using default STLSQ parameters.
-    s_optdmd = BOPDMD(
-        svd_rank=2,
-        mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts_dict": {}},
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-    # (2) Using altered tolerance value.
-    s_optdmd = BOPDMD(
-        svd_rank=2,
-        mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts_dict": {"tol": 1e-12}},
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-    # (3) Using fixed number of iterations.
-    s_optdmd = BOPDMD(
-        svd_rank=2,
-        mode_prox=mode_prox,
-        varpro_opts_dict={"stlsq_opts_dict": {"tol": -1, "max_iter": 10}},
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+#         s_optdmd = BOPDMD(
+#             svd_rank=1,
+#             mode_prox=mode_prox,
+#             varpro_opts_dict={"stlsq_opts_dict": {}},
+#         )
+#         s_optdmd.fit(X1, t)
+#         assert n > np.count_nonzero(s_optdmd.modes)
+#         n = np.count_nonzero(s_optdmd.modes)
 
 
-def test_fit_stlsq_2():
-    """
-    Test that fitting with sequential thresholding and plain thresholding
-    approximately produce the same model for various parameters. Checks
-    similarity of the modes and the eigenvalues. Tests hard thresholding.
-    """
-    for _gamma in [1e-4, 2e-4, 5e-4, 1e-3, 5e-3]:
+# def test_fit_stlsq_1():
+#     """
+#     Test that fitting with sequential thresholding produces accurate models.
+#     Test using various parameterizations of the stlsq method.
+#     """
 
-        def mode_prox(Z):
-            return hard_threshold(Z, gamma=_gamma)
+#     def mode_prox(Z):
+#         return hard_threshold(Z, gamma=0.001)
 
-        # Fit model with plain thresholding.
-        s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-        s_optdmd.fit(X, t)
+#     # (1) Using default STLSQ parameters.
+#     s_optdmd = BOPDMD(
+#         svd_rank=2,
+#         mode_prox=mode_prox,
+#         varpro_opts_dict={"stlsq_opts_dict": {}},
+#     )
+#     s_optdmd.fit(X, t)
+#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
 
-        # Fit model with sequential thresholding.
-        s_optdmd_stlsq = BOPDMD(
-            svd_rank=2,
-            mode_prox=mode_prox,
-            varpro_opts_dict={"stlsq_opts_dict": {}},
-        )
-        s_optdmd_stlsq.fit(X, t)
+#     # (2) Using altered tolerance value.
+#     s_optdmd = BOPDMD(
+#         svd_rank=2,
+#         mode_prox=mode_prox,
+#         varpro_opts_dict={"stlsq_opts_dict": {"tol": 1e-12}},
+#     )
+#     s_optdmd.fit(X, t)
+#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
 
-        # Compare modes and eigenvalues.
-        assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
-        np.testing.assert_allclose(
-            sort_imag(s_optdmd.eigs),
-            sort_imag(s_optdmd_stlsq.eigs),
-            rtol=0.01,
-        )
+#     # (3) Using fixed number of iterations.
+#     s_optdmd = BOPDMD(
+#         svd_rank=2,
+#         mode_prox=mode_prox,
+#         varpro_opts_dict={"stlsq_opts_dict": {"tol": -1, "max_iter": 10}},
+#     )
+#     s_optdmd.fit(X, t)
+#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
+#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
 
 
-def test_fit_stlsq_3():
-    """
-    Test that fitting with sequential thresholding and plain thresholding
-    approximately produce the same model for various parameters. Checks
-    similarity of the modes and the eigenvalues. Tests soft thresholding.
-    """
-    for _gamma in [0.01, 0.02, 0.05, 0.1]:
+# def test_fit_stlsq_2():
+#     """
+#     Test that fitting with sequential thresholding and plain thresholding
+#     approximately produce the same model for various parameters. Checks
+#     similarity of the modes and the eigenvalues. Tests hard thresholding.
+#     """
+#     for _gamma in [1e-4, 2e-4, 5e-4, 1e-3, 5e-3]:
 
-        def mode_prox(Z):
-            return soft_threshold(Z, gamma=_gamma)
+#         def mode_prox(Z):
+#             return hard_threshold(Z, gamma=_gamma)
 
-        # Fit model with plain thresholding.
-        s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-        s_optdmd.fit(X, t)
+#         # Fit model with plain thresholding.
+#         s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
+#         s_optdmd.fit(X, t)
 
-        # Fit model with sequential thresholding.
-        s_optdmd_stlsq = BOPDMD(
-            svd_rank=2,
-            mode_prox=mode_prox,
-            varpro_opts_dict={"stlsq_opts_dict": {"apply_final_prox": True}},
-        )
-        s_optdmd_stlsq.fit(X, t)
+#         # Fit model with sequential thresholding.
+#         s_optdmd_stlsq = BOPDMD(
+#             svd_rank=2,
+#             mode_prox=mode_prox,
+#             varpro_opts_dict={"stlsq_opts_dict": {}},
+#         )
+#         s_optdmd_stlsq.fit(X, t)
 
-        # Compare modes and eigenvalues.
-        assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
-        np.testing.assert_allclose(
-            sort_imag(s_optdmd.eigs),
-            sort_imag(s_optdmd_stlsq.eigs),
-            rtol=0.01,
-        )
+#         # Compare modes and eigenvalues.
+#         assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
+#         np.testing.assert_allclose(
+#             sort_imag(s_optdmd.eigs),
+#             sort_imag(s_optdmd_stlsq.eigs),
+#             rtol=0.01,
+#         )
+
+
+# def test_fit_stlsq_3():
+#     """
+#     Test that fitting with sequential thresholding and plain thresholding
+#     approximately produce the same model for various parameters. Checks
+#     similarity of the modes and the eigenvalues. Tests soft thresholding.
+#     """
+#     for _gamma in [0.01, 0.02, 0.05, 0.1]:
+
+#         def mode_prox(Z):
+#             return soft_threshold(Z, gamma=_gamma)
+
+#         # Fit model with plain thresholding.
+#         s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
+#         s_optdmd.fit(X, t)
+
+#         # Fit model with sequential thresholding.
+#         s_optdmd_stlsq = BOPDMD(
+#             svd_rank=2,
+#             mode_prox=mode_prox,
+#             varpro_opts_dict={"stlsq_opts_dict": {"apply_final_prox": True}},
+#         )
+#         s_optdmd_stlsq.fit(X, t)
+
+#         # Compare modes and eigenvalues.
+#         assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
+#         np.testing.assert_allclose(
+#             sort_imag(s_optdmd.eigs),
+#             sort_imag(s_optdmd_stlsq.eigs),
+#             rtol=0.01,
+#         )
 
 
 def test_use_proj_1():

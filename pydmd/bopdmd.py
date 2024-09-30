@@ -24,7 +24,7 @@ from .dmdbase import DMDBase
 from .dmdoperator import DMDOperator
 from .snapshots import Snapshots
 from .utils import compute_rank, compute_svd
-from .sbopdmd_utils import stlsq, split_B
+from .sbopdmd_utils import split_B
 
 
 class BOPDMDOperator(DMDOperator):
@@ -137,11 +137,6 @@ class BOPDMDOperator(DMDOperator):
         or not to print information regarding the method's iterative progress.
         Default is False, don't print information.
     :type verbose: bool
-    :param stlsq_opts_dict: Dictionary containing the desired parameter values
-        for sequential thresholded least-squares. See `stlsq` documentation in
-        `sbopdmd_utils.py` for default values and descriptions for each
-        parameter.
-    :type stlsq_opts_dict: dict
     """
 
     def __init__(
@@ -168,7 +163,6 @@ class BOPDMDOperator(DMDOperator):
         eps_stall=1e-12,
         use_fulljac=True,
         verbose=False,
-        stlsq_opts_dict=None,
     ):
         self._compute_A = compute_A
         self._use_proj = use_proj
@@ -195,7 +189,6 @@ class BOPDMDOperator(DMDOperator):
             verbose,
         ]
         self._varpro_opts_warn()
-        self._stlsq_opts_dict = stlsq_opts_dict
 
         self._modes = None
         self._eigenvalues = None
@@ -613,19 +606,8 @@ class BOPDMDOperator(DMDOperator):
             index_local[self._index_global] = False
 
             # Apply thresholding to the modes.
-            if self._stlsq_opts_dict is None:
-                # Only apply the proximal operator once.
-                B_full[index_local] = self._mode_prox(B_full[index_local])
-            else:
-                # Apply sequential thresholding to the modes.
-                B_full = stlsq(
-                    A=Phi(alpha, t),
-                    B=full_data,
-                    X0=B_full,
-                    prox_func=self._mode_prox,
-                    sparse_inds=index_local,
-                    **self._stlsq_opts_dict,
-                )
+            # Only apply the proximal operator once.
+            B_full[index_local] = self._mode_prox(B_full[index_local])
 
             # Project the modes back down if requested.
             if self._use_proj:
