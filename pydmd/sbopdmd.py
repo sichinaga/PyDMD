@@ -462,6 +462,36 @@ class SparseBOPDMDOperator(BOPDMDOperator):
 
         return B, alpha, converged
 
+    def _single_trial_compute_operator(self, H, t, init_alpha):
+        """
+        Helper function that computes the standard optimized dmd operator.
+        Returns the resulting DMD modes, eigenvalues, amplitudes, reduced
+        system matrix, full system matrix, and whether or not convergence
+        of the variable projection routine was reached.
+        """
+        B, alpha, converged = self._variable_projection(
+            H, t, init_alpha, self._exp_function, self._exp_function_deriv
+        )
+
+        # Save the modes, eigenvalues, and amplitudes.
+        B, b = self._split_B(B)
+        e = alpha
+        w = B.T
+
+        # Compute the projected propagator Atilde.
+        w_proj = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot(
+            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
+        )
+
+        # Compute the full system matrix A.
+        if self._compute_A:
+            A = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
+        else:
+            A = None
+
+        return w, e, b, Atilde, A, converged
+
 
 class SparseBOPDMD(BOPDMD):
     """

@@ -112,26 +112,6 @@ def scaled_soft_threshold(
     return X_thres
 
 
-def split_B(B: np.ndarray):
-    """
-    Split the given amplitude-scaled mode matrix into a normalized mode
-    matrix and an array of mode amplitudes.
-    """
-    # Get the mode amplitudes.
-    b = np.linalg.norm(B, axis=1)
-
-    # Remove extremely small-amplitude modes.
-    inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
-    b[inds_small] = 1.0
-
-    # Divide the amplitudes out from B.
-    B_normalized = np.diag(1 / b).dot(B)
-    B_normalized[inds_small] = 0.0
-    b[inds_small] = 0.0
-
-    return B_normalized, b
-
-
 def get_zero_cols(X: np.ndarray, tol=1e-16):
     """
     Return the indices of the columns of X that are the zero vector.
