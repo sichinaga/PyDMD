@@ -362,6 +362,26 @@ class BOPDMDOperator(DMDOperator):
 
         return eigenvalues
 
+    def _apply_mode_prox(self, modes):
+        """
+        Helper function that applies `self._mode_prox` to the given modes.
+        Only applies the function at the mode indices that are not flagged
+        as global by `self._index_global`.
+
+        :param modes: (r, n) matrix of modes, where r = SVD truncation rank.
+        :type modes: numpy.ndarray
+        :return: (r, n) matrix of proxied modes.
+        :rtype: numpy.ndarray
+        """
+        # Get the mode indices at which to apply mode_prox.
+        index_local = np.ones(len(modes), dtype=bool)
+        index_local[self._index_global] = False
+
+        # Apply mode_prox to the given modes.
+        modes[index_local] = self._mode_prox(modes[index_local])
+
+        return modes
+
     def _exp_function(self, alpha, t):
         """
         Matrix of exponentials.
@@ -579,10 +599,7 @@ class BOPDMDOperator(DMDOperator):
 
             # Apply proximal operator if given, and if data isn't projected.
             if self._mode_prox is not None and not self._use_proj:
-                # Get the indices at which to apply sparsity.
-                index_local = np.ones(IA, dtype=bool)
-                index_local[self._index_global] = False
-                B[index_local] = self._mode_prox(B[index_local])
+                B = self._apply_mode_prox(B)
 
             return B
 
@@ -787,9 +804,7 @@ class BOPDMDOperator(DMDOperator):
             B = B.dot(self._proj_basis.T)
             # Apply mode_prox after projecting back out.
             if self._mode_prox is not None:
-                index_local = np.ones(IA, dtype=bool)
-                index_local[self._index_global] = False
-                B[index_local] = self._mode_prox(B[index_local])
+                B = self._apply_mode_prox(B)
 
         # Save the modes, eigenvalues, and amplitudes.
         B, b = self._split_B(B)
