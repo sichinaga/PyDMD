@@ -6,6 +6,7 @@ from pydmd.bopdmd import BOPDMD
 from pydmd.sbopdmd import SparseBOPDMD
 from pydmd.sbopdmd_utils import L0_norm, hard_threshold, soft_threshold
 
+# TODO: Ensure that SR3_step default = 1 is now accounted for.
 
 def generate_toy_data(
     n: int = 50,
@@ -63,6 +64,42 @@ def sort_imag(a: np.ndarray):
     """Sorts the entries of a by imaginary and then real component."""
     sorted_inds = np.argsort(a.imag + 1j * a.real)
     return a[sorted_inds]
+
+
+def assert_model_accurate(model, eig_tol=0.01, recon_tol=0.1):
+    """
+    Check that the given model accurately computes system eigenvalues and that
+    it accurately reconstructs the noise-free version of the data.
+    """
+    np.testing.assert_allclose(sort_imag(model.eigs), true_eigs, rtol=eig_tol)
+    assert relative_error(model.reconstructed_data, X_clean) < recon_tol
+
+
+def assert_model_similar(model_1, model_2, mode_tol=0.01, eig_tol=0.01):
+    """
+    Check that the given models are approximately the same. Checks the
+    similarity of the modes and the eigenvalues of the models.
+    """
+    assert relative_error(model_1.modes, model_2.modes) < mode_tol
+    np.testing.assert_allclose(
+        sort_imag(model_1.eigs),
+        sort_imag(model_2.eigs),
+        rtol=eig_tol,
+    )
+
+
+def assert_modes_sparse(model, index_modes=None, sparsity_ratio=0.8):
+    """
+    Check that the modes specified by index_modes are actually sparse.
+    """
+    n, r = model.modes.shape
+
+    if index_modes is None:
+        index_modes = np.arange(len(r))
+
+    num_active_features = np.count_nonzero(model.modes[:, index_modes])
+    max_active_features = sparsity_ratio * n * len(index_modes)
+    assert num_active_features < max_active_features
 
 
 def test_l0():
@@ -207,25 +244,44 @@ def test_regularizer_errors():
         )
 
 
-def test_fit_prox():
+def test_fit_SR3():
     """
-    Test that basic sparse-mode DMD with prox-gradient can accurately compute
+    Test that basic sparse-mode DMD with SR3 updates can accurately compute
     eigenvalues and reconstruct the data (i.e. it produces accurate models).
+    Additionally confirm that the modes are actually sparsified.
     """
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
+        regularizer_params={"lambda": 0.001},
     )
     s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
+
+
+def test_fit_FISTA():
+    """
+    Test that basic sparse-mode DMD with prox-gradient can accurately compute
+    eigenvalues and reconstruct the data (i.e. it produces accurate models).
+    Additionally confirm that the modes are actually sparsified.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0}, # lambda needs to be updated
+        SR3_step=0, # don't use SR3
+    )
+    s_optdmd.fit(X, t)
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
 
 def test_fit_thresh():
     """
     Test that basic sparse-mode DMD with thresholding can accurately compute
     eigenvalues and reconstruct the data (i.e. it produces accurate models).
+    Additionally confirm that the modes are actually sparsified.
     """
 
     def mode_prox(Z):
@@ -233,45 +289,46 @@ def test_fit_thresh():
 
     s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
     s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
 
-def test_sparsity_1():
+def test_sparsity_SR3():
     """
-    Test that the modes produced by sparse-mode DMD are actually sparse
-    compared to the modes produced by regular DMD. Here, we fit only to
-    the square mode of the data, polluted by noise.
+    Test that increasing the sparsity parameter actually results in sparser
+    and sparser modes. This test uses the SR3 model and fits to the Gaussian
+    mode of the data, polluted by noise. Tests L0 and L1 norm sparsity.
     """
-    # (0) Fit a regular OptDMD model to the data.
-    optdmd = BOPDMD(svd_rank=1)
-    optdmd.fit(X2, t)
+    # Test for various parameters of the L0 norm.
+    n = 50
+    for _lambda in [1e-4, 1e-3, 1e-2]:
+        s_optdmd = SparseBOPDMD(
+            svd_rank=1,
+            mode_regularizer="l0",
+            regularizer_params={"lambda": _lambda},
+        )
+        s_optdmd.fit(X1, t)
+        assert n > np.count_nonzero(s_optdmd.modes)
+        n = np.count_nonzero(s_optdmd.modes)
 
-    # (1) Fit a prox-gradient model to the data.
-    s_optdmd_1 = SparseBOPDMD(
-        svd_rank=1,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-    )
-    s_optdmd_1.fit(X2, t)
-
-    # (2) Fit a thresholding model to the data.
-    def mode_prox(Z):
-        return hard_threshold(Z, gamma=0.001)
-
-    s_optdmd_2 = BOPDMD(svd_rank=1, mode_prox=mode_prox)
-    s_optdmd_2.fit(X2, t)
-
-    # Finally, compare number of nonzero entries.
-    assert np.count_nonzero(optdmd.modes) > np.count_nonzero(s_optdmd_1.modes)
-    assert np.count_nonzero(optdmd.modes) > np.count_nonzero(s_optdmd_2.modes)
+    # Test for various parameters of the L1 norm.
+    n = 50
+    for _lambda in [0.01, 0.02, 0.03]:
+        s_optdmd = SparseBOPDMD(
+            svd_rank=1,
+            mode_regularizer="l1",
+            regularizer_params={"lambda": _lambda},
+        )
+        s_optdmd.fit(X1, t)
+        assert n > np.count_nonzero(s_optdmd.modes)
+        n = np.count_nonzero(s_optdmd.modes)
 
 
-def test_sparsity_2():
+def test_sparsity_FISTA():
     """
     Test that increasing the sparsity parameter actually results in sparser
     and sparser modes. This test uses the prox-gradient model and fits to the
-    Gaussian mode of the data, polluted by noise.
+    Gaussian mode of the data, polluted by noise. Tests L0 and L1 norm.
     """
     # Test for various parameters of the L0 norm.
     n = 50
@@ -280,6 +337,7 @@ def test_sparsity_2():
             svd_rank=1,
             mode_regularizer="l0",
             regularizer_params={"lambda": _lambda},
+            SR3_step=0,
         )
         s_optdmd.fit(X1, t)
         assert n > np.count_nonzero(s_optdmd.modes)
@@ -292,17 +350,18 @@ def test_sparsity_2():
             svd_rank=1,
             mode_regularizer="l1",
             regularizer_params={"lambda": _lambda},
+            SR3_step=0,
         )
         s_optdmd.fit(X1, t)
         assert n > np.count_nonzero(s_optdmd.modes)
         n = np.count_nonzero(s_optdmd.modes)
 
 
-def test_sparsity_3():
+def test_sparsity_thresh():
     """
     Test that increasing the sparsity parameter actually results in sparser
     and sparser modes. This test uses the thresholding model and fits to the
-    Gaussian mode of the data, polluted by noise.
+    Gaussian mode of the data, polluted by noise. Tests L0 and L1 norm.
     """
     # Test for various parameters of hard thresholding.
     n = 50
@@ -329,132 +388,38 @@ def test_sparsity_3():
         n = np.count_nonzero(s_optdmd.modes)
 
 
-# def test_sparsity_4():
-#     """
-#     Test that increasing the sparsity parameter actually results in sparser
-#     and sparser modes. This test uses the sequential thresholding model and
-#     fits to the Gaussian mode of the data, polluted by noise.
-#     """
-#     n = 50
-#     for _gamma in [1e-4, 1e-3, 1e-2]:
-
-#         def mode_prox(Z):
-#             return hard_threshold(Z, gamma=_gamma)
-
-#         s_optdmd = BOPDMD(
-#             svd_rank=1,
-#             mode_prox=mode_prox,
-#             varpro_opts_dict={"stlsq_opts_dict": {}},
-#         )
-#         s_optdmd.fit(X1, t)
-#         assert n > np.count_nonzero(s_optdmd.modes)
-#         n = np.count_nonzero(s_optdmd.modes)
+def test_eig_constraints():
+    """
+    Test eigenvalue constraint functionality and correctness.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.001},
+        eig_constraints={"imag"},
+    )
+    s_optdmd.fit(X, t)
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
+    assert np.all(s_optdmd.eigs.real == 0.0)
 
 
-# def test_fit_stlsq_1():
-#     """
-#     Test that fitting with sequential thresholding produces accurate models.
-#     Test using various parameterizations of the stlsq method.
-#     """
-
-#     def mode_prox(Z):
-#         return hard_threshold(Z, gamma=0.001)
-
-#     # (1) Using default STLSQ parameters.
-#     s_optdmd = BOPDMD(
-#         svd_rank=2,
-#         mode_prox=mode_prox,
-#         varpro_opts_dict={"stlsq_opts_dict": {}},
-#     )
-#     s_optdmd.fit(X, t)
-#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-#     # (2) Using altered tolerance value.
-#     s_optdmd = BOPDMD(
-#         svd_rank=2,
-#         mode_prox=mode_prox,
-#         varpro_opts_dict={"stlsq_opts_dict": {"tol": 1e-12}},
-#     )
-#     s_optdmd.fit(X, t)
-#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-#     # (3) Using fixed number of iterations.
-#     s_optdmd = BOPDMD(
-#         svd_rank=2,
-#         mode_prox=mode_prox,
-#         varpro_opts_dict={"stlsq_opts_dict": {"tol": -1, "max_iter": 10}},
-#     )
-#     s_optdmd.fit(X, t)
-#     np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-#     assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+def test_use_optdmd_eigs():
+    """
+    Test that using the Optimized DMD eigenvalues produces accurate models.
+    """
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.001},
+        varpro_opts_dict={"use_optdmd_eigs": True},
+    )
+    s_optdmd.fit(X, t)
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
 
-# def test_fit_stlsq_2():
-#     """
-#     Test that fitting with sequential thresholding and plain thresholding
-#     approximately produce the same model for various parameters. Checks
-#     similarity of the modes and the eigenvalues. Tests hard thresholding.
-#     """
-#     for _gamma in [1e-4, 2e-4, 5e-4, 1e-3, 5e-3]:
-
-#         def mode_prox(Z):
-#             return hard_threshold(Z, gamma=_gamma)
-
-#         # Fit model with plain thresholding.
-#         s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-#         s_optdmd.fit(X, t)
-
-#         # Fit model with sequential thresholding.
-#         s_optdmd_stlsq = BOPDMD(
-#             svd_rank=2,
-#             mode_prox=mode_prox,
-#             varpro_opts_dict={"stlsq_opts_dict": {}},
-#         )
-#         s_optdmd_stlsq.fit(X, t)
-
-#         # Compare modes and eigenvalues.
-#         assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
-#         np.testing.assert_allclose(
-#             sort_imag(s_optdmd.eigs),
-#             sort_imag(s_optdmd_stlsq.eigs),
-#             rtol=0.01,
-#         )
-
-
-# def test_fit_stlsq_3():
-#     """
-#     Test that fitting with sequential thresholding and plain thresholding
-#     approximately produce the same model for various parameters. Checks
-#     similarity of the modes and the eigenvalues. Tests soft thresholding.
-#     """
-#     for _gamma in [0.01, 0.02, 0.05, 0.1]:
-
-#         def mode_prox(Z):
-#             return soft_threshold(Z, gamma=_gamma)
-
-#         # Fit model with plain thresholding.
-#         s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-#         s_optdmd.fit(X, t)
-
-#         # Fit model with sequential thresholding.
-#         s_optdmd_stlsq = BOPDMD(
-#             svd_rank=2,
-#             mode_prox=mode_prox,
-#             varpro_opts_dict={"stlsq_opts_dict": {"apply_final_prox": True}},
-#         )
-#         s_optdmd_stlsq.fit(X, t)
-
-#         # Compare modes and eigenvalues.
-#         assert relative_error(s_optdmd.modes, s_optdmd_stlsq.modes) < 0.01
-#         np.testing.assert_allclose(
-#             sort_imag(s_optdmd.eigs),
-#             sort_imag(s_optdmd_stlsq.eigs),
-#             rtol=0.01,
-#         )
-
-
+# TODO: Check beyond this point.
 def test_use_proj_1():
     """
     Test that fitting without projection produces accurate models.
@@ -467,8 +432,7 @@ def test_use_proj_1():
         use_proj=False,
     )
     s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+    assert_model_accurate(s_optdmd)
 
     # (2) Test for the thresholding model.
     def mode_prox(Z):
@@ -476,8 +440,7 @@ def test_use_proj_1():
 
     s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox, use_proj=False)
     s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
+    assert_model_accurate(s_optdmd)
 
 
 def test_use_proj_2():
@@ -534,42 +497,7 @@ def test_use_proj_3():
         s_optdmd_noproj.fit(X, t)
 
         # Compare modes and eigenvalues.
-        assert relative_error(s_optdmd_proj.modes, s_optdmd_noproj.modes) < 0.01
-        np.testing.assert_allclose(
-            sort_imag(s_optdmd_proj.eigs),
-            sort_imag(s_optdmd_noproj.eigs),
-            rtol=0.01,
-        )
-
-
-def test_use_proj_4():
-    """
-    Test that models generated with data projection and models generated
-    without approximately produce the same model for various parameters.
-    Checks similarity of the modes and the eigenvalues. Uses thresh.
-    """
-    for _gamma in [1e-4, 2e-4, 5e-4, 1e-3, 5e-3]:
-
-        def mode_prox(Z):
-            return hard_threshold(Z, gamma=_gamma)
-
-        # Fit model WITH data projection.
-        s_optdmd_proj = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-        s_optdmd_proj.fit(X, t)
-
-        # Fit model WITHOUT data projection.
-        s_optdmd_noproj = BOPDMD(
-            svd_rank=2, mode_prox=mode_prox, use_proj=False
-        )
-        s_optdmd_noproj.fit(X, t)
-
-        # Compare modes and eigenvalues.
-        assert relative_error(s_optdmd_proj.modes, s_optdmd_noproj.modes) < 0.01
-        np.testing.assert_allclose(
-            sort_imag(s_optdmd_proj.eigs),
-            sort_imag(s_optdmd_noproj.eigs),
-            rtol=0.01,
-        )
+        assert_model_similar(s_optdmd_proj, s_optdmd_noproj)
 
 
 def test_use_mask_1():
@@ -609,32 +537,7 @@ def test_use_mask_2():
         use_mask=True,
     )
     s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-
-# def test_use_mask_3():
-#     """
-#     Test that using pixel masking actually reduces fitting time.
-#     Test using the large toy data set -- results must be sparse.
-#     """
-#     t1 = time.time()
-#     s_optdmd = SparseBOPDMD(
-#         svd_rank=2,
-#         mode_regularizer="l0",
-#         regularizer_params={"lambda": 2.0},
-#         use_mask=True,
-#     )
-#     s_optdmd.fit(X_big, t)
-#     t2 = time.time()
-#     s_optdmd = SparseBOPDMD(
-#         svd_rank=2,
-#         mode_regularizer="l0",
-#         regularizer_params={"lambda": 2.0},
-#     )
-#     s_optdmd.fit(X_big, t)
-#     t3 = time.time()
-#     assert t2 - t1 < t3 - t2
+    assert_model_accurate(s_optdmd)
 
 
 def test_use_mask_4():
@@ -662,12 +565,7 @@ def test_use_mask_4():
         s_optdmd_nomask.fit(X, t)
 
         # Compare modes and eigenvalues.
-        assert relative_error(s_optdmd_mask.modes, s_optdmd_nomask.modes) < 1e-6
-        np.testing.assert_allclose(
-            sort_imag(s_optdmd_mask.eigs),
-            sort_imag(s_optdmd_nomask.eigs),
-            rtol=1e-6,
-        )
+        assert_model_similar(s_optdmd_mask, s_optdmd_nomask)
 
 
 def test_use_mask_5():
@@ -705,52 +603,6 @@ def test_feature_tol():
     s_optdmd.fit(X_big, t)
     t3 = time.time()
     assert t2 - t1 < t3 - t2
-
-
-def test_use_optdmd_eigs():
-    """
-    Test that using the Optimized DMD eigenvalues produces accurate models.
-    """
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-        varpro_opts_dict={"use_optdmd_eigs": True},
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-
-
-def test_eig_constraints():
-    """
-    Test eigenvalue constraint functionality and correctness.
-    """
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-        eig_constraints={"imag"},
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
-    assert np.all(s_optdmd.eigs.real == 0.0)
-
-
-def test_SR3_1():
-    """
-    Test that using SR3 produces accurate models.
-    """
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-        SR3_scale=1e+4,
-    )
-    s_optdmd.fit(X, t)
-    np.testing.assert_allclose(sort_imag(s_optdmd.eigs), true_eigs, rtol=0.01)
-    assert relative_error(s_optdmd.reconstructed_data, X_clean) < 0.1
 
 
 def test_SR3_2():

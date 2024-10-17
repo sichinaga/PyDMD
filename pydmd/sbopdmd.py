@@ -26,20 +26,36 @@ from .sbopdmd_utils import (
     group_lasso,
     scaled_hard_threshold,
     scaled_soft_threshold,
-    accelerated_prox_grad,
     get_zero_cols,
+    FISTA,
+    SR3,
 )
 
 
 class SparseBOPDMDOperator(BOPDMDOperator):
     """
     BOP-DMD operator with sparse modes.
+
+    :param feature_tol: Tolerance for terminating the mode solver for
+        individual features of the data, as features and their respective
+        optimizations are treated as independent. Once a mode feature's
+        tolerance is reached, it is no longer updated across variable
+        projection iterations.
+    :type feature_tol: float
+    :param use_optdmd_eigs: Whether or not to compute the Jacobian using the
+        formulation used by Optimized DMD. By default, this formulation is not
+        used and the Jacobian expression for a generic mode matrix is used.
+    :type use_optdmd_eigs: bool
+    :param mode_opt_params: Dictionary of optional parameters for either the
+        `SR3` or `FISTA` functions. See the documentation for these functions
+        found in `sbopdmd_utils.py` for more information.
+    :type mode_opt_params: dict
     """
 
     def __init__(
         self,
         mode_regularizer,
-        SR3_scale,
+        SR3_step,
         compute_A,
         use_proj,
         use_mask,
@@ -63,10 +79,8 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         eps_stall=1e-12,
         verbose=False,
         feature_tol=0.0,
-        prox_grad_tol=1e-6,
-        prox_grad_maxiter=1000,
-        prox_grad_restart=True,
         use_optdmd_eigs=False,
+        mode_opt_params=None,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -91,7 +105,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             verbose=verbose,
         )
         self._mode_regularizer = mode_regularizer
-        self._SR3_scale = SR3_scale
+        self._SR3_step = SR3_step
         self._init_B = init_B
 
         # Information for pixel masking.
@@ -112,11 +126,11 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self._lev_marq_params["lamup"] = lamup
         self._lev_marq_params["use_optdmd_eigs"] = use_optdmd_eigs
 
-        # Set the parameters of accelerated prox-gradient descent.
-        self._prox_grad_params = {}
-        self._prox_grad_params["tol"] = prox_grad_tol
-        self._prox_grad_params["max_iter"] = prox_grad_maxiter
-        self._prox_grad_params["use_restarts"] = prox_grad_restart
+        # Set the parameters of SR3 or FISTA.
+        if mode_opt_params is None:
+            self._mode_opt_params = {}
+        else:
+            self._mode_opt_params = mode_opt_params
 
     @property
     def unmasked_features(self):
@@ -135,56 +149,26 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         Use accelerated prox-gradient to update B for the current alpha.
         """
         A = Phi(alpha, t)
-        m, r = A.shape
 
         # Get the indices at which to apply sparsity.
-        index_local = np.ones(r, dtype=bool)
+        index_local = np.ones(len(B0), dtype=bool)
         index_local[self._index_global] = False
-        # TODO: Do something with index_local.
 
-        if self._SR3_scale > 0.0:
+        if self._SR3_step > 0.0:
             # Apply Sparse Relaxed Regularized Regression (SR3).
-            k = self._SR3_scale
-            # Compute the Hk matrix shorthand and its inverse.
-            Hk = A.conj().T.dot(A) + k * np.eye(r)
-            Hk_inv = np.linalg.inv(Hk)
-            # Compute the new SR3 linear operators.
-            Fk = np.vstack(
-                [
-                    k * A.dot(Hk_inv),
-                    np.sqrt(k) * (np.eye(r) - k * Hk_inv),
-                ]
+            B_updated, obj_hist, err_hist = SR3(
+                nu=self._SR3_step,
+                W0=B0,
+                A=A,
+                B=H,
+                func_g=self._mode_regularizer,
+                prox_g=self._mode_prox,
+                sparse_inds=index_local,
+                **self._mode_opt_params,
             )
-            Gk = np.vstack(
-                [
-                    np.eye(m) - np.linalg.multi_dot([A, Hk_inv, A.conj().T]),
-                    np.sqrt(k) * Hk_inv.dot(A.conj().T),
-                ]
-            )
-
-            W0 = (1 / k) * (Hk.dot(B0) - A.conj().T.dot(H))
-            beta_f = np.linalg.norm(Fk, 2) ** 2
-
-            def func_f(Z):
-                return 0.5 * np.linalg.norm(Gk.dot(H) - Fk.dot(Z), "fro") ** 2
-
-            def grad_f(Z):
-                return Fk.conj().T.dot(Fk.dot(Z) - Gk.dot(H))
-
-            W_updated, obj_hist, err_hist = accelerated_prox_grad(
-                W0,
-                func_f,
-                self._mode_regularizer,
-                grad_f,
-                self._mode_prox,
-                beta_f,
-                **self._prox_grad_params,
-            )
-
-            B_updated = Hk_inv.dot(A.conj().T.dot(H) + k * W_updated)
 
         else:
-            # Apply prox-gradient directly to the B matrix.
+            # Apply proximal gradient directly to the B matrix (FISTA).
             beta_f = np.linalg.norm(A, 2) ** 2
 
             def func_f(Z):
@@ -193,14 +177,14 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             def grad_f(Z):
                 return A.conj().T.dot(A.dot(Z) - H)
 
-            B_updated, obj_hist, err_hist = accelerated_prox_grad(
-                B0,
-                func_f,
-                self._mode_regularizer,
-                grad_f,
-                self._mode_prox,
-                beta_f,
-                **self._prox_grad_params,
+            B_updated, obj_hist, err_hist = FISTA(
+                X0=B0,
+                func_f=func_f,
+                func_g=self._mode_regularizer,
+                grad_f=grad_f,
+                prox_g=self._mode_prox,
+                beta_f=beta_f,
+                **self._mode_opt_params,
             )
 
         if self._verbose:
@@ -522,11 +506,12 @@ class SparseBOPDMD(BOPDMD):
         DMD pipeline via mode_prox, hence this parameter is not used if
         mode_prox is not provided. By default, all modes are sparsified.
     :type index_global: iterable
-    :param SR3_scale: Relaxation parameter for the Sparse Relaxed Regularized
-        Regression (SR3) routine. Higher values lead to a smaller gap between
-        the computed modes and the auxiliary SR3 variable. If zero, proximal
-        gradient is applied directly to the modes and SR3 is not used.
-    :type SR3_scale: float
+    :param SR3_step: Relaxation parameter for the Sparse Relaxed Regularized
+        Regression (SR3) routine. Smaller values lead to a smaller gap between
+        the computed modes and the auxiliary SR3 variable. If not given (or if
+        less than or equal to zero), proximal gradient is applied directly to
+        the modes and SR3 is not used. By default, SR3 is used.
+    :type SR3_step: float
     :param use_mask: Flag that determines whether or not to ignore features
         that are deemed inactive during the variable projection routine. If
         `True`, features that are eliminated due to sparsity are ignored during
@@ -548,7 +533,7 @@ class SparseBOPDMD(BOPDMD):
         mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
         index_global: Union[list, tuple] = None,
-        SR3_scale: float = 0.0,
+        SR3_step: float = 1.0,
         svd_rank: Number = 0,
         compute_A: bool = False,
         use_proj: bool = True,
@@ -585,7 +570,7 @@ class SparseBOPDMD(BOPDMD):
         )
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
-        self._SR3_scale = SR3_scale
+        self._SR3_step = SR3_step
         self._use_mask = use_mask
         self._init_B = init_B
 
@@ -756,7 +741,7 @@ class SparseBOPDMD(BOPDMD):
         # the projection basis have been defined.
         self._Atilde = SparseBOPDMDOperator(
             self.mode_regularizer,
-            self._SR3_scale,
+            self._SR3_step,
             self._compute_A,
             self._use_proj,
             self._use_mask,
