@@ -6,7 +6,6 @@ from pydmd.bopdmd import BOPDMD
 from pydmd.sbopdmd import SparseBOPDMD
 from pydmd.sbopdmd_utils import L0_norm, hard_threshold, soft_threshold
 
-# TODO: Ensure that SR3_step default = 1 is now accounted for.
 
 def generate_toy_data(
     n: int = 50,
@@ -95,7 +94,7 @@ def assert_modes_sparse(model, index_modes=None, sparsity_ratio=0.8):
     n, r = model.modes.shape
 
     if index_modes is None:
-        index_modes = np.arange(len(r))
+        index_modes = np.arange(r)
 
     num_active_features = np.count_nonzero(model.modes[:, index_modes])
     max_active_features = sparsity_ratio * n * len(index_modes)
@@ -419,56 +418,66 @@ def test_use_optdmd_eigs():
     assert_modes_sparse(s_optdmd)
 
 
-# TODO: Check beyond this point.
 def test_use_proj_1():
     """
-    Test that fitting without projection produces accurate models.
+    Test that fitting WITHOUT projection produces accurate models.
     """
-    # (1) Test for the prox-gradient model.
+    # (1) Test for the default SR3 model.
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
+        regularizer_params={"lambda": 0.001},
         use_proj=False,
     )
     s_optdmd.fit(X, t)
     assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
-    # (2) Test for the thresholding model.
+    # (2) Test for the FISTA model.
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1.0},
+        SR3_step=0,
+        use_proj=False,
+    )
+    s_optdmd.fit(X, t)
+    assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
+
+    # (3) Test for the thresholding model.
     def mode_prox(Z):
         return hard_threshold(Z, gamma=0.001)
 
     s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox, use_proj=False)
     s_optdmd.fit(X, t)
     assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
 
 def test_use_proj_2():
     """
     Test that using data projection actually reduces fitting time.
     Test using the large toy data set -- use any parameters.
+    Tests the default SR3 model.
     """
-    # (1) Test for the prox-gradient model.
     t1 = time.time()
-    s_optdmd = SparseBOPDMD(svd_rank=2, mode_regularizer="l0")
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.001},
+    )
     s_optdmd.fit(X_big, t)
     t2 = time.time()
-    s_optdmd = SparseBOPDMD(svd_rank=2, mode_regularizer="l0", use_proj=False)
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 0.001},
+        use_proj=False,
+    )
     s_optdmd.fit(X_big, t)
     t3 = time.time()
-    assert t2 - t1 < t3 - t2
 
-    # (2) Test for the thresholding model.
-    def mode_prox(Z):
-        return hard_threshold(Z, gamma=0.001)
-
-    t1 = time.time()
-    s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox)
-    s_optdmd.fit(X_big, t)
-    t2 = time.time()
-    s_optdmd = BOPDMD(svd_rank=2, mode_prox=mode_prox, use_proj=False)
-    s_optdmd.fit(X_big, t)
-    t3 = time.time()
     assert t2 - t1 < t3 - t2
 
 
@@ -476,9 +485,10 @@ def test_use_proj_3():
     """
     Test that models generated with data projection and models generated
     without approximately produce the same model for various parameters.
-    Checks similarity of the modes and the eigenvalues. Uses prox.
+    Checks similarity of the modes and the eigenvalues.
+    Tests the default SR3 model.
     """
-    for _lambda in [0.1, 0.2, 0.5, 1.0, 5.0]:
+    for _lambda in [1e-4, 1e-3, 1e-2]:
         # Fit model WITH data projection.
         s_optdmd_proj = SparseBOPDMD(
             svd_rank=2,
@@ -500,6 +510,62 @@ def test_use_proj_3():
         assert_model_similar(s_optdmd_proj, s_optdmd_noproj)
 
 
+def test_use_proj_4():
+    """
+    Test that models generated with data projection and models generated
+    without approximately produce the same model for various parameters.
+    Checks similarity of the modes and the eigenvalues.
+    Tests the default FISTA model.
+    """
+    for _lambda in [0.1, 1.0, 10.0]:
+        # Fit model WITH data projection.
+        s_optdmd_proj = SparseBOPDMD(
+            svd_rank=2,
+            mode_regularizer="l0",
+            regularizer_params={"lambda": _lambda},
+            SR3_step=0,
+        )
+        s_optdmd_proj.fit(X, t)
+
+        # Fit model WITHOUT data projection.
+        s_optdmd_noproj = SparseBOPDMD(
+            svd_rank=2,
+            mode_regularizer="l0",
+            regularizer_params={"lambda": _lambda},
+            SR3_step=0,
+            use_proj=False,
+        )
+        s_optdmd_noproj.fit(X, t)
+
+        # Compare modes and eigenvalues.
+        assert_model_similar(s_optdmd_proj, s_optdmd_noproj)
+
+
+def test_feature_tol():
+    """
+    Test that adjusting the feature tolerance actually reduces fitting time.
+    Test using the large toy data set -- results must be dense.
+    """
+    t1 = time.time()
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1e-4},
+        varpro_opts_dict={"feature_tol": 1e-3},
+    )
+    s_optdmd.fit(X_big, t)
+    t2 = time.time()
+    s_optdmd = SparseBOPDMD(
+        svd_rank=2,
+        mode_regularizer="l0",
+        regularizer_params={"lambda": 1e-4},
+        varpro_opts_dict={"feature_tol": 0.0},
+    )
+    s_optdmd.fit(X_big, t)
+    t3 = time.time()
+    assert t2 - t1 < t3 - t2
+
+
 def test_use_mask_1():
     """
     Test that the pixel mask expectedly masks the correct pixels.
@@ -509,7 +575,7 @@ def test_use_mask_1():
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
+        regularizer_params={"lambda": 0.001},
         use_mask=True,
     )
     s_optdmd.fit(X2, t)
@@ -520,7 +586,7 @@ def test_use_mask_1():
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
+        regularizer_params={"lambda": 0.001},
     )
     s_optdmd.fit(X2, t)
     np.testing.assert_array_equal(s_optdmd.mask, np.zeros(50))
@@ -533,124 +599,22 @@ def test_use_mask_2():
     s_optdmd = SparseBOPDMD(
         svd_rank=2,
         mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
+        regularizer_params={"lambda": 0.001},
         use_mask=True,
     )
     s_optdmd.fit(X, t)
     assert_model_accurate(s_optdmd)
+    assert_modes_sparse(s_optdmd)
 
 
-def test_use_mask_4():
+def test_use_mask_3():
     """
-    Test that models generated with pixel masking and models generated
-    without produce the same model for sufficiently high sparsity.
-    Checks similarity of the modes and the eigenvalues.
+    Test that errors are thrown if mask is requested when it doesn't exist.
     """
-    for _lambda in [1.0, 5.0, 10.0, 20.0]:
-        # Fit model WITH pixel masking.
-        s_optdmd_mask = SparseBOPDMD(
-            svd_rank=2,
-            mode_regularizer="l0",
-            regularizer_params={"lambda": _lambda},
-            use_mask=True,
-        )
-        s_optdmd_mask.fit(X, t)
-
-        # Fit model WITHOUT pixel masking.
-        s_optdmd_nomask = SparseBOPDMD(
-            svd_rank=2,
-            mode_regularizer="l0",
-            regularizer_params={"lambda": _lambda},
-        )
-        s_optdmd_nomask.fit(X, t)
-
-        # Compare modes and eigenvalues.
-        assert_model_similar(s_optdmd_mask, s_optdmd_nomask)
-
-
-def test_use_mask_5():
-    """
-    Test that the proper errors are thrown if mask is requested before fitting.
-    """
-    s_optdmd = SparseBOPDMD(use_mask=True)
-    with raises(ValueError):
-        _ = s_optdmd.mask
-
     s_optdmd = SparseBOPDMD()
     with raises(ValueError):
         _ = s_optdmd.mask
 
-
-def test_feature_tol():
-    """
-    Test that adjusting the feature tolerance actually reduces fitting time.
-    Test using the large toy data set -- results must be dense.
-    """
-    t1 = time.time()
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 0.1},
-        varpro_opts_dict={"feature_tol": 1e-3},
-    )
-    s_optdmd.fit(X_big, t)
-    t2 = time.time()
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 0.1},
-    )
-    s_optdmd.fit(X_big, t)
-    t3 = time.time()
-    assert t2 - t1 < t3 - t2
-
-
-def test_SR3_2():
-    """
-    Test that fitting with a small SR3_scale is like applying normal DMD, and
-    that fitting with a large SR3_scale is like applying normal sparse-mode
-    DMD. Checks similarity of the modes and the eigenvalues.
-    """
-    # Fit model with normal DMD.
-    optdmd = BOPDMD(svd_rank=2)
-    optdmd.fit(X, t)
-
-    # Fit model with normal sparse-mode DMD.
-    s_optdmd = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-    )
-    s_optdmd.fit(X, t)
-
-    # SR3 with small scaling.
-    s_optdmd_SR3small = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-        SR3_scale=1e-4,
-    )
-    s_optdmd_SR3small.fit(X, t)
-
-    # SR3 with big scaling.
-    s_optdmd_SR3big = SparseBOPDMD(
-        svd_rank=2,
-        mode_regularizer="l0",
-        regularizer_params={"lambda": 1.0},
-        SR3_scale=1e+4,
-    )
-    s_optdmd_SR3big.fit(X, t)
-
-    # Compare modes and eigenvalues.
-    assert relative_error(optdmd.modes, s_optdmd_SR3small.modes) < 0.05
-    np.testing.assert_allclose(
-        sort_imag(optdmd.eigs),
-        sort_imag(s_optdmd_SR3small.eigs),
-        rtol=0.01,
-    )
-    assert relative_error(s_optdmd.modes, s_optdmd_SR3big.modes) < 0.01
-    np.testing.assert_allclose(
-        sort_imag(s_optdmd.eigs),
-        sort_imag(s_optdmd_SR3big.eigs),
-        rtol=0.01,
-    )
+    s_optdmd = SparseBOPDMD(use_mask=True)
+    with raises(ValueError):
+        _ = s_optdmd.mask

@@ -27,6 +27,7 @@ from .sbopdmd_utils import (
     scaled_hard_threshold,
     scaled_soft_threshold,
     get_zero_cols,
+    support_lstsq,
     FISTA,
     SR3,
 )
@@ -56,6 +57,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self,
         mode_regularizer,
         SR3_step,
+        apply_debias,
         compute_A,
         use_proj,
         use_mask,
@@ -106,6 +108,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         )
         self._mode_regularizer = mode_regularizer
         self._SR3_step = SR3_step
+        self._apply_debias = apply_debias
         self._init_B = init_B
 
         # Information for pixel masking.
@@ -125,6 +128,9 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self._lev_marq_params["maxlam"] = maxlam
         self._lev_marq_params["lamup"] = lamup
         self._lev_marq_params["use_optdmd_eigs"] = use_optdmd_eigs
+
+        if self._apply_debias:
+            self._lev_marq_params["use_optdmd_eigs"] = True
 
         # Set the parameters of SR3 or FISTA.
         if mode_opt_params is None:
@@ -167,6 +173,9 @@ class SparseBOPDMDOperator(BOPDMDOperator):
                 **self._mode_opt_params,
             )
 
+            if self._apply_debias:
+                B_updated = support_lstsq(S=B_updated, A=A, B=H)
+
         else:
             # Apply proximal gradient directly to the B matrix (FISTA).
             beta_f = np.linalg.norm(A, 2) ** 2
@@ -184,6 +193,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
                 grad_f=grad_f,
                 prox_g=self._mode_prox,
                 beta_f=beta_f,
+                sparse_inds=index_local,
                 **self._mode_opt_params,
             )
 
@@ -258,8 +268,8 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         # Loop to determine lambda (the step-size parameter).
         rhs_temp = residual.ravel(order="F")[:, None]
         q_out, djac_out, j_pvt = qr(djac_matrix, mode="economic", pivoting=True)
-        ij_pvt = np.arange(IA)
-        ij_pvt = ij_pvt[j_pvt]
+        ij_pvt = np.zeros(IA, dtype=int)
+        ij_pvt[j_pvt] = np.arange(IA, dtype=int)
         rjac[:IA] = np.triu(djac_out[:IA])
         rhs_top = q_out.conj().T.dot(rhs_temp)
         scales_pvt = scales[j_pvt[:IA]]
@@ -505,7 +515,7 @@ class SparseBOPDMD(BOPDMD):
         global. Global modes are not sparsified when applying the Sparse-Mode
         DMD pipeline via mode_prox, hence this parameter is not used if
         mode_prox is not provided. By default, all modes are sparsified.
-    :type index_global: iterable
+    :type index_global: list
     :param SR3_step: Relaxation parameter for the Sparse Relaxed Regularized
         Regression (SR3) routine. Smaller values lead to a smaller gap between
         the computed modes and the auxiliary SR3 variable. If not given (or if
@@ -532,8 +542,9 @@ class SparseBOPDMD(BOPDMD):
         self,
         mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
-        index_global: Union[list, tuple] = None,
+        index_global: list = None,
         SR3_step: float = 1.0,
+        apply_debias: bool = False,
         svd_rank: Number = 0,
         compute_A: bool = False,
         use_proj: bool = True,
@@ -571,6 +582,7 @@ class SparseBOPDMD(BOPDMD):
         self._mode_regularizer = mode_regularizer
         self._regularizer_params = regularizer_params
         self._SR3_step = SR3_step
+        self._apply_debias = apply_debias
         self._use_mask = use_mask
         self._init_B = init_B
 
@@ -742,6 +754,7 @@ class SparseBOPDMD(BOPDMD):
         self._Atilde = SparseBOPDMDOperator(
             self.mode_regularizer,
             self._SR3_step,
+            self._apply_debias,
             self._compute_A,
             self._use_proj,
             self._use_mask,

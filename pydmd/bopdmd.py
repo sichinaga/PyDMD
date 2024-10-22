@@ -83,7 +83,7 @@ class BOPDMDOperator(DMDOperator):
         global. Global modes are not sparsified when applying the Sparse-Mode
         DMD pipeline via mode_prox, hence this parameter is not used if
         mode_prox is not provided. By default, all modes are sparsified.
-    :type index_global: iterable
+    :type index_global: list
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept
@@ -1045,7 +1045,7 @@ class BOPDMD(DMDBase):
         global. Global modes are not sparsified when applying the Sparse-Mode
         DMD pipeline via mode_prox, hence this parameter is not used if
         mode_prox is not provided. By default, all modes are sparsified.
-    :type index_global: iterable
+    :type index_global: list
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept

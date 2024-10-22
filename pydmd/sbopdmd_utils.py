@@ -122,6 +122,40 @@ def get_zero_cols(X: np.ndarray, tol=1e-16):
     return np.nonzero(~np.any(X, axis=0))[0]
 
 
+def support_lstsq(
+    S: np.ndarray,
+    A: np.ndarray,
+    B: np.ndarray,
+):
+    """
+    Least-squares for solving
+        B = AX,
+    for the matrices A, B over the given support.
+
+    :param S: (r, n) support matrix.
+    :type S: np.ndarray
+    :param A: (m, r) right-hand side matrix.
+    :type A: np.ndarray
+    :param B: (m, n) left-hand side matrix.
+    :type B: np.ndarray
+
+    :return: (r, n) solution matrix X.
+    :rtype: np.ndarray
+    """
+    # Initialize X with zeros.
+    # Note: nonzero entries will be updated later.
+    X = np.zeros(S.shape, dtype="complex")
+
+    # Regress again, but only on features given by the support.
+    for j in range(X.shape[1]):
+        support_inds = S[:, j] != 0.0
+        X[support_inds, j] = np.linalg.lstsq(
+            A[:, support_inds], B[:, j], rcond=None
+        )[0]
+
+    return X
+
+
 def FISTA(
     X0: np.ndarray,
     func_f: Callable,
@@ -254,7 +288,7 @@ def SR3(
     :type sparse_inds: np.ndarray
 
     :return: Tuple consisting of the following components:
-        1. Final (r, n) optimal solution.
+        1. Final (r, n) optimal sparse support matrix.
         2. Objective value history across iterations.
         3. Convergece history across iterations.
     :rtype: Tuple[np.ndarray, list, list]
