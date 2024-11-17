@@ -373,6 +373,10 @@ class BOPDMDOperator(DMDOperator):
         :return: (r, n) matrix of proxied modes.
         :rtype: numpy.ndarray
         """
+        # Compute and set the estimated global modes based on B0.
+        if self._index_global == "auto":
+            self._index_global = self._get_global_modes(modes)
+
         # Get the mode indices at which to apply mode_prox.
         index_local = np.ones(len(modes), dtype=bool)
         index_local[self._index_global] = False
@@ -381,6 +385,34 @@ class BOPDMDOperator(DMDOperator):
         modes[index_local] = self._mode_prox(modes[index_local])
 
         return modes
+
+    @staticmethod
+    def _get_global_modes(modes, active_thresh=0.1, global_thresh=0.5):
+        """
+        :param modes: (r, n) matrix of modes.
+        :type modes: np.ndarray
+        :param active_thresh: ratio of maximum mode value that must must be
+            surpassed in order for a mode feature to be considered active.
+        :type active_thresh: float
+        :param global_thresh: ratio of total features that must be active
+            in order for a mode to be considered a global mode.
+        :type global_thresh: float
+        :return: list of global mode indices.
+        :rtype: list
+        """
+        # Grab number of features per mode.
+        _, n = modes.shape
+
+        # # Compute the maximum value for each mode.
+        # mode_max = np.tile(np.max(np.abs(modes), axis=1), (n, 1)).T
+
+        # Compute the maximum value across all modes.
+        mode_max = np.max(np.abs(modes))
+
+        # Compute the number of features per mode above the active thresh.
+        num_active = np.sum(np.abs(modes) > active_thresh * mode_max, axis=1)
+
+        return np.where(num_active > global_thresh * n)[0].tolist()
 
     def _exp_function(self, alpha, t):
         """
@@ -1419,7 +1451,7 @@ class BOPDMD(DMDBase):
         # rank-truncated SVD of Y.
         Y = (ux1 + ux2) / 2
         # Element-wise division by time differences. w/o large T
-        Z = (ux2 - ux1) / (self._time[1:] - self._time[:-1])  
+        Z = (ux2 - ux1) / (self._time[1:] - self._time[:-1])
         U, s, V = compute_svd(Y, self._svd_rank)
         S = np.diag(s)
 

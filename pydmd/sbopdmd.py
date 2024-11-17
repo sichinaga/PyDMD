@@ -51,6 +51,10 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         `SR3` or `FISTA` functions. See the documentation for these functions
         found in `sbopdmd_utils.py` for more information.
     :type mode_opt_params: dict
+    :param global_mode_params: Dictionary of optional parameters for the
+        `_get_global_modes` function in `bopdmd.py`. Accounts for parameters
+        `active_thresh` (default = 0.1) and `global_thresh` (default = 0.5).
+    :type global_mode_params: dict
     """
 
     def __init__(
@@ -83,6 +87,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         feature_tol=0.0,
         use_optdmd_eigs=False,
         mode_opt_params=None,
+        global_mode_params=None,
     ):
         super().__init__(
             compute_A=compute_A,
@@ -137,6 +142,12 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             self._mode_opt_params = {}
         else:
             self._mode_opt_params = mode_opt_params
+
+        # Set the parameters of get_global_modes.
+        if global_mode_params is None:
+            self._global_mode_params = {}
+        else:
+            self._global_mode_params = global_mode_params
 
     @property
     def unmasked_features(self):
@@ -198,7 +209,11 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             )
 
         if self._verbose:
-            print("Prox Gradient Results:")
+            if self._SR3_step > 0.0:
+                print("SR3 Results:")
+            else:
+                print("FISTA Results:")
+
             plt.figure(figsize=(8, 2))
             plt.subplot(1, 2, 1)
             plt.title("Objective")
@@ -356,6 +371,14 @@ class SparseBOPDMDOperator(BOPDMDOperator):
             B = np.linalg.lstsq(Phi(alpha, t), H, rcond=None)[0]
         else:
             B = np.copy(self._init_B)
+
+        # Pre-compute the estimated global modes based on B0.
+        if self._index_global == "auto":
+            self._index_global = self._get_global_modes(
+                B, **self._global_mode_params
+            )
+            if self._verbose:
+                print(f"Setting index_global to {self._index_global}")
 
         # Initialize storage for objective values and error.
         # Note: "error" refers to differences in iterations.
@@ -542,7 +565,7 @@ class SparseBOPDMD(BOPDMD):
         self,
         mode_regularizer: Union[str, Callable] = "l1",
         regularizer_params: dict = None,
-        index_global: list = None,
+        index_global: Union[list, str] = None,
         SR3_step: float = 1.0,
         apply_debias: bool = False,
         svd_rank: Number = 0,
