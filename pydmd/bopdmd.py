@@ -80,6 +80,11 @@ class BOPDMDOperator(DMDOperator):
         routine after the modes have been projected back to the space of the
         full input data.
     :type mode_prox: function
+    :param index_global: DMD mode indices at which modes are assumed to be
+        global. Global modes are not sparsified when applying the Sparse-Mode
+        DMD pipeline via mode_prox, hence this parameter is not used if
+        mode_prox is not provided. By default, all modes are sparsified.
+    :type index_global: list
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept
@@ -149,6 +154,7 @@ class BOPDMDOperator(DMDOperator):
         eig_sort,
         eig_constraints,
         mode_prox,
+        index_global,
         remove_bad_bags,
         bag_warning,
         bag_maxfail,
@@ -173,6 +179,7 @@ class BOPDMDOperator(DMDOperator):
         self._eig_sort = eig_sort
         self._eig_constraints = eig_constraints
         self._mode_prox = mode_prox
+        self._index_global = index_global
         self._remove_bad_bags = remove_bad_bags
         self._bag_warning = bag_warning
         self._bag_maxfail = bag_maxfail
@@ -464,6 +471,58 @@ class BOPDMDOperator(DMDOperator):
 
         return eigenvalues
 
+    def _apply_mode_prox(self, modes):
+        """
+        Helper function that applies `self._mode_prox` to the given modes.
+        Only applies the function at the mode indices that are not flagged
+        as global by `self._index_global`.
+
+        :param modes: (r, n) matrix of modes, where r = SVD truncation rank.
+        :type modes: numpy.ndarray
+        :return: (r, n) matrix of proxied modes.
+        :rtype: numpy.ndarray
+        """
+        # Compute and set the estimated global modes based on B0.
+        if self._index_global == "auto":
+            self._index_global = self._get_global_modes(modes)
+
+        # Get the mode indices at which to apply mode_prox.
+        index_local = np.ones(len(modes), dtype=bool)
+        index_local[self._index_global] = False
+
+        # Apply mode_prox to the given modes.
+        modes[index_local] = self._mode_prox(modes[index_local])
+
+        return modes
+
+    @staticmethod
+    def _get_global_modes(modes, active_thresh=0.1, global_thresh=0.5):
+        """
+        :param modes: (r, n) matrix of modes.
+        :type modes: np.ndarray
+        :param active_thresh: ratio of maximum mode value that must must be
+            surpassed in order for a mode feature to be considered active.
+        :type active_thresh: float
+        :param global_thresh: ratio of total features that must be active
+            in order for a mode to be considered a global mode.
+        :type global_thresh: float
+        :return: list of global mode indices.
+        :rtype: list
+        """
+        # Grab number of features per mode.
+        _, n = modes.shape
+
+        # # Compute the maximum value for each mode.
+        # mode_max = np.tile(np.max(np.abs(modes), axis=1), (n, 1)).T
+
+        # Compute the maximum value across all modes.
+        mode_max = np.max(np.abs(modes))
+
+        # Compute the number of features per mode above the active thresh.
+        num_active = np.sum(np.abs(modes) > active_thresh * mode_max, axis=1)
+
+        return np.where(num_active > global_thresh * n)[0].tolist()
+
     def _exp_function(self, alpha, t):
         """
         Matrix of exponentials.
@@ -703,7 +762,7 @@ class BOPDMDOperator(DMDOperator):
 
             # Apply proximal operator if given, and if data isn't projected.
             if self._mode_prox is not None and not self._use_proj:
-                B = self._mode_prox(B)
+                B = self._apply_mode_prox(B)
 
             # Apply amplitude limits if provided.
             if amp_lim is not None:
@@ -841,6 +900,7 @@ class BOPDMDOperator(DMDOperator):
                             "Consider increasing maxlam or lamup."
                         )
                         print(msg.format(itr + 1, error))
+
                     return B, alpha, converged
 
                 # ...otherwise, update and proceed.
@@ -894,6 +954,26 @@ class BOPDMDOperator(DMDOperator):
 
         return B, alpha, converged
 
+    @staticmethod
+    def _split_B(B: np.ndarray):
+        """
+        Split the given amplitude-scaled mode matrix into a normalized mode
+        matrix and an array of mode amplitudes.
+        """
+        # Get the mode amplitudes.
+        b = np.linalg.norm(B, axis=1)
+
+        # Remove extremely small-amplitude modes.
+        inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
+        b[inds_small] = 1.0
+
+        # Divide the amplitudes out from B.
+        B_normalized = np.diag(1 / b).dot(B)
+        B_normalized[inds_small] = 0.0
+        b[inds_small] = 0.0
+
+        return B_normalized, b
+
     def _single_trial_compute_operator(self, H, t, init_alpha):
         """
         Helper function that computes the standard optimized dmd operator.
@@ -912,31 +992,23 @@ class BOPDMDOperator(DMDOperator):
             self._exp_function_deriv,
             b_lim,
         )
-        # Save the modes, eigenvalues, and amplitudes respectively.
-        w = B.T
-        e = alpha
-        b = np.sqrt(np.sum(np.abs(w) ** 2, axis=0))
+        # Unproject the modes if they are currently condensed.
+        if self._use_proj:
+            B = B.dot(self._proj_basis.T)
+            # Apply mode_prox after projecting back out.
+            if self._mode_prox is not None:
+                B = self._apply_mode_prox(B)
 
-        # Normalize the modes and the amplitudes.
-        inds_small = np.abs(b) < (10 * np.finfo(float).eps * np.max(b))
-        b[inds_small] = 1.0
-        w = w.dot(np.diag(1 / b))
-        w[:, inds_small] = 0.0
-        b[inds_small] = 0.0
+        # Save the modes, eigenvalues, and amplitudes.
+        B, b = self._split_B(B)
+        e = alpha
+        w = B.T
 
         # Compute the projected propagator Atilde.
-        if self._use_proj:
-            Atilde = np.linalg.multi_dot([w, np.diag(e), np.linalg.pinv(w)])
-            # Unproject the dmd modes.
-            w = self._proj_basis.dot(w)
-            # Apply mode proximal operator if given.
-            if self._mode_prox is not None:
-                w = self._mode_prox(w)
-        else:
-            w_proj = self._proj_basis.conj().T.dot(w)
-            Atilde = np.linalg.multi_dot(
-                [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
-            )
+        w_proj = self._proj_basis.conj().T.dot(w)
+        Atilde = np.linalg.multi_dot(
+            [w_proj, np.diag(e), np.linalg.pinv(w_proj)]
+        )
 
         # Compute the full system matrix A.
         if self._compute_A:
@@ -1162,6 +1234,11 @@ class BOPDMD(DMDBase):
         routine after the modes have been projected back to the space of the
         full input data.
     :type mode_prox: function
+    :param index_global: DMD mode indices at which modes are assumed to be
+        global. Global modes are not sparsified when applying the Sparse-Mode
+        DMD pipeline via mode_prox, hence this parameter is not used if
+        mode_prox is not provided. By default, all modes are sparsified.
+    :type index_global: list
     :param remove_bad_bags: Whether or not to exclude results from bagging
         trials that didn't converge according to the tolerance used for
         variable projection. Default is False, all trial results are kept
@@ -1206,6 +1283,7 @@ class BOPDMD(DMDBase):
         eig_sort="auto",
         eig_constraints=None,
         mode_prox=None,
+        index_global=None,
         remove_bad_bags=False,
         bag_warning=100,
         bag_maxfail=200,
@@ -1251,6 +1329,10 @@ class BOPDMD(DMDBase):
         self._mode_prox = mode_prox
         self._real_eig_limit = real_eig_limit
         self._varpro_flag = varpro_flag
+
+        if index_global is None:
+            index_global = []
+        self._index_global = index_global
 
         self._snapshots_holder = None
         self._time = None
@@ -1639,6 +1721,7 @@ class BOPDMD(DMDBase):
             self._eig_sort,
             self._eig_constraints,
             self._mode_prox,
+            self._index_global,
             self._remove_bad_bags,
             self._bag_warning,
             self._bag_maxfail,
