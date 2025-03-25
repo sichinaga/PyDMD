@@ -84,6 +84,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         eps_stall=1e-12,
         verbose=False,
         varpro_flag=True,
+        num_eig_updates=1,
         feature_tol=0.0,
         use_optdmd_eigs=False,
         mode_opt_params=None,
@@ -123,6 +124,7 @@ class SparseBOPDMDOperator(BOPDMDOperator):
         self._tol = tol
         self._eps_stall = eps_stall
         self._verbose = verbose
+        self._num_eig_updates = num_eig_updates
         self._feature_tol = feature_tol
 
         # Set the parameters of Levenberg-Marquardt.
@@ -412,15 +414,20 @@ class SparseBOPDMDOperator(BOPDMDOperator):
                 plt.show()
 
             # Take a Levenberg-Marquardt step to update alpha.
+            alpha_new = np.copy(alpha)
             if self._use_proj:
                 B_new_proj = B_new.dot(self._proj_basis.conj())
-                alpha_new = self._compute_alpha_levmarq(
-                    B_new_proj, alpha, H_proj, **self._lev_marq_params
-                )
+                for _ in range(self._num_eig_updates):
+                    alpha_next = self._compute_alpha_levmarq(
+                        B_new_proj, alpha_new, H_proj, **self._lev_marq_params
+                    )
+                    np.copyto(alpha_new, alpha_next)
             else:
-                alpha_new = self._compute_alpha_levmarq(
-                    B_new, alpha, H, **self._lev_marq_params
-                )
+                for _ in range(self._num_eig_updates):
+                    alpha_next = self._compute_alpha_levmarq(
+                        B_new, alpha_new, H, **self._lev_marq_params
+                    )
+                    np.copyto(alpha_new, alpha_next)
 
             # Get new objective and error values.
             err_alpha = np.linalg.norm(alpha - alpha_new)
