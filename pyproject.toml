@@ -4,12 +4,13 @@ dynamic = ["version"]
 description = "Python Dynamic Mode Decomposition."
 requires-python = ">=3.8"
 dependencies = [
-    "numpy<2",
+    "numpy",
     "scipy>=1.6.0",
     "matplotlib",
     "scikit-learn",
     "xarray",
     "h5netcdf",
+    "typing_extensions>=4.7.0;python_version<'3.12'"
 ]
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -43,6 +44,13 @@ test = [
     "pytest-cov",
     "pytest-mock",
     "ezyrb>=v1.2.1.post2205"
+]
+tutorial = [
+    "jupyter",
+    "pandas",
+    "ezyrb",
+    "opencv-python",
+    "ffmpeg-python",
 ]
 docs = [
     "sphinx>=1.4",
